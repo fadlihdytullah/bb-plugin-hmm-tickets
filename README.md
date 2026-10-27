@@ -1,6 +1,6 @@
 # Hmm Tickets
 
-A small ticket list that lives where the work does: a floating window per
+A small ticket list that lives where the work does: a dialog per
 project, grouped by status, with every ticket one right-click away from an
 agent.
 
@@ -18,8 +18,21 @@ Requires BB 0.42 or newer.
 - The checklist glyph in the thread header.
 - **Hmm Tickets: toggle tickets** in the command palette (`Cmd+Shift+P`).
 
-Tickets belong to a project, so the window stays hidden on the home screen,
-settings, or any other projectless route.
+The window opens on the board of the project you are in. On a projectless
+screen it opens the project list instead.
+
+## All projects
+
+The back arrow in the list header opens the project list inside the same
+window. Pick one to open its board.
+
+- Every project with its To Do, In Progress and Done counts, searchable and
+  sortable. **Open project** in the `...` menu jumps to the project.
+- A 14-day panel: tickets done, in progress now, projects with progress, and a
+  per-day chart. **Export last 14 days** downloads a Markdown summary with the
+  done list grouped by day.
+- A ticket's finish date is recorded from the moment it moves to Done, so older
+  Done tickets are not counted.
 
 ## The list
 
@@ -28,7 +41,8 @@ group heading to collapse it. The search field above the list filters on title
 and description; `/` focuses it.
 
 A ticket is three fields — title, description, status. The dot at the end of a
-row means the ticket has a description.
+row means the ticket has a description. A chip like `2/5` means it has
+sub-tasks, two of them done.
 
 ### Creating
 
@@ -49,17 +63,33 @@ row means the ticket has a description.
 | `↑` `↓` | Move the selection |
 | `Shift+↑` `Shift+↓` | Extend it |
 | `Enter` | Open the selected ticket |
+| Click the title of the selected row | Rename it in place |
 | `Cmd+A` | Select everything visible |
-| `Esc` | Clear the search, then the selection |
+| `Esc` | Clear the search, then the selection, then leave archived, then close the window |
 
 Right-clicking a selected row acts on the whole selection. A bar appears at the
 bottom while anything is selected, with **Send all** and an overflow menu.
 
 ### The detail
 
-Opening a ticket shows it in read mode, the description rendered as Markdown.
+Click the title to rename it in place. Opening a ticket shows it in read mode, the description rendered as Markdown.
 **Edit** switches to writing; `Cmd+Enter` saves and `Esc` cancels. The footer
 also carries the status picker, **Send**, archive, and delete.
+
+### Sub-tasks
+
+A ticket can hold sub-tasks, one level deep. In the detail, a progress bar sits
+under the title and a **Sub-tasks** section sits under the description; click
+`2 of 5 done` to jump to it. Type in **Add a sub-task** and press Enter to add
+the next one. The checkbox toggles To Do and Done; the row menu sets In
+Progress or deletes. Drag a row by its grip to reorder, or focus the grip and
+press `↑` / `↓`. Click a sub-task's title to rename it in place (`Enter` saves, `Esc`
+cancels), double-click the row to open it, or right-click for Open, Rename,
+status and Delete. Use the parent link above an opened sub-task to go back.
+
+Archiving and deleting a ticket takes its sub-tasks with it. When the last
+sub-task is done, a toast offers to mark the parent done. Sending a ticket
+includes its open sub-tasks in the prompt.
 
 ## Sending to an agent
 
@@ -85,7 +115,7 @@ instead — the choice is remembered per project.
 bb tickets list [--status <todo|in_progress|done>] [--archived] [--json]
 bb tickets show <ref> [--json]
 bb tickets current [--json]
-bb tickets create <title> [--description <text>] [--json]
+bb tickets create <title> [--description <text>] [--parent <ref>] [--json]
 bb tickets update <ref> [--title <text>] [--description <text>] [--status <status>]
 bb tickets status <ref>... <todo|in_progress|done>
 bb tickets archive <ref>... | bb tickets unarchive <ref>...
@@ -106,6 +136,9 @@ bb plugin reload hmm-tickets
 ```
 
 `bb plugin dev` watches the sources and reloads on every change.
+
+`node --experimental-strip-types --test lib/summary.test.ts` checks the summary
+helpers.
 
 ## License
 

@@ -1,11 +1,11 @@
-A ticket list that lives where the work does: a floating window per project,
+A ticket list that lives where the work does: a dialog per project,
 grouped by status, with every ticket one right-click away from an agent.
 
 ## What you get
 
-- A narrow floating window, opened with `Cmd+Shift+K`, from the thread header,
-  or from the command palette. It belongs to a project, so a projectless screen
-  never shows it.
+- A dialog, opened with `Cmd+Shift+K`, from the thread header,
+  or from the command palette. It opens on the project you are in, or on the
+  project list when there is none.
 - A flat list grouped into **To Do**, **In Progress**, and **Done**. Groups
   collapse, and a search field filters title and description.
 - Tickets are three fields: title, description, status. Descriptions render as
@@ -13,12 +13,19 @@ grouped by status, with every ticket one right-click away from an agent.
 - `+ New` or `N` opens an inline row — type a title, press Enter, type the next.
   The composer's ticket button turns the current draft into a ticket: first line
   the title, the rest the description.
+- A ticket can hold sub-tasks, one level deep: a progress bar, a checklist in
+  the detail, and a `2/5` chip in the list. Sending a ticket hands the agent
+  its open sub-tasks too.
 - Click selects, double-click opens, Shift-click takes a range and Cmd-click
   picks one at a time. Arrow keys move, `Cmd+A` takes everything, `Esc` clears.
 - **Send to Agent** on one ticket or a whole selection: one new thread for the
   batch, one thread per ticket, or straight into the thread you are reading.
   The ticket moves to In Progress, shows a spinner while the agent works, and
   its badge opens that thread.
+- The back arrow opens **All projects** inside the dialog: every project with
+  its counts, plus a 14-day panel of what got done with a Markdown export.
+  Picking a project opens its board; the dialog still opens on the project
+  you are in.
 - Archive, unarchive, and delete, from the row menu or the detail footer.
 
 ## How it works

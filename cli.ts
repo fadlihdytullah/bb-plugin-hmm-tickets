@@ -1,6 +1,7 @@
 import type { BbPluginApi, PluginCliResult } from "@get-bb/plugin-sdk";
 import { flagString, parseArgs } from "./lib/args.ts";
 import {
+  progressOf,
   STATUS_LABEL,
   STATUSES,
   statusSchema,
@@ -14,6 +15,7 @@ export interface TicketOps {
   byThread(threadId: string): Ticket[];
   create(input: {
     projectId: string;
+    parentId?: string;
     title: string;
     description: string;
   }): Promise<string>;
@@ -30,6 +32,7 @@ export interface TicketOps {
     separate: boolean,
     threadId?: string,
     worktree?: boolean,
+    notes?: string,
   ): Promise<string[]>;
   hydrate(ticket: Ticket): Promise<Ticket>;
 }
@@ -45,7 +48,7 @@ const USAGE = `bb tickets <command>
   archive <ref>... | unarchive <ref>...
   delete <ref>... --yes
   send <ref>... [--separate | --here | --thread <id>] [--worktree|--no-worktree]
-       [--json]
+       [--notes <text>] [--json]
 
 A <ref> is a ticket id or a unique id prefix. Commands taking <ref>... accept
 several. send opens one new thread for every ticket together; --separate opens
@@ -59,13 +62,21 @@ function shortId(id: string): string {
   return id.slice(0, 8);
 }
 
-function line(ticket: Ticket): string {
+function line(ticket: Ticket, children: Ticket[] = []): string[] {
   const thread = ticket.threadId === null ? "" : ` · ${ticket.threadId}`;
   const working = ticket.working ? " · working" : "";
-  return `  ${shortId(ticket.id)}  ${ticket.title}${thread}${working}`;
+  const { done, total } = progressOf(children);
+  const progress = total === 0 ? "" : ` · ${done}/${total} sub-tasks`;
+  return [
+    `  ${shortId(ticket.id)}  ${ticket.title}${progress}${thread}${working}`,
+    ...children.map(
+      (child) =>
+        `    ${shortId(child.id)}  ${child.title} · ${STATUS_LABEL[child.status]}`,
+    ),
+  ];
 }
 
-function detail(ticket: Ticket): string {
+function detail(ticket: Ticket, children: Ticket[] = []): string {
   const rows = [
     `id          ${ticket.id}`,
     `title       ${ticket.title}`,
@@ -75,6 +86,16 @@ function detail(ticket: Ticket): string {
   ];
   if (ticket.description.trim() !== "") {
     rows.push("", ticket.description.trim());
+  }
+  if (children.length > 0) {
+    rows.push(
+      "",
+      "Sub-tasks",
+      ...children.map(
+        (child) =>
+          `  ${shortId(child.id)}  ${child.title} · ${STATUS_LABEL[child.status]}`,
+      ),
+    );
   }
   return rows.join("\n");
 }
@@ -101,6 +122,9 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
     }
     return tickets;
   };
+
+  const childrenOf = (ticket: Ticket): Ticket[] =>
+    ops.byProject(ticket.projectId).filter((one) => one.parentId === ticket.id);
 
   const parseStatus = (value: string): Status => {
     const parsed = statusSchema.safeParse(value);
@@ -132,7 +156,8 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
       {
         name: "create",
         summary: "Create a ticket",
-        usage: "bb tickets create <title> [--description <text>] [--json]",
+        usage:
+          "bb tickets create <title> [--description <text>] [--parent <ref>] [--json]",
       },
       {
         name: "update",
@@ -184,10 +209,26 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             const archived = flags["archived"] === true;
             const filter = flagString(flags, "status");
             const wanted = filter === undefined ? null : parseStatus(filter);
-            const tickets = (
-              await ops.list({ projectId, archived })
-            ).filter((ticket) => wanted === null || ticket.status === wanted);
-            if (json) return ok(JSON.stringify({ tickets }, null, 2));
+            const all = await ops.list({ projectId, archived });
+            const tickets = all.filter(
+              (ticket) =>
+                ticket.parentId === null &&
+                (wanted === null || ticket.status === wanted),
+            );
+            if (json) {
+              const shown = new Set(tickets.map((ticket) => ticket.id));
+              return ok(
+                JSON.stringify(
+                  {
+                    tickets: all.filter((ticket) =>
+                      shown.has(ticket.parentId ?? ticket.id),
+                    ),
+                  },
+                  null,
+                  2,
+                ),
+              );
+            }
             if (tickets.length === 0) {
               return ok(archived ? "No archived tickets" : "No tickets");
             }
@@ -198,7 +239,12 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
               if (group.length === 0) return [];
               return [
                 `${STATUS_LABEL[status]} (${group.length})`,
-                ...group.map(line),
+                ...group.flatMap((ticket) =>
+                  line(
+                    ticket,
+                    all.filter((one) => one.parentId === ticket.id),
+                  ),
+                ),
               ];
             });
             return ok(groups.join("\n"));
@@ -208,7 +254,12 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             const ref = rest[0];
             if (ref === undefined) return fail("Usage: bb tickets show <ref>");
             const ticket = await ops.hydrate(resolve(projectOf(), ref));
-            return ok(json ? JSON.stringify(ticket, null, 2) : detail(ticket));
+            const children = childrenOf(ticket);
+            return ok(
+              json
+                ? JSON.stringify({ ...ticket, children }, null, 2)
+                : detail(ticket, children),
+            );
           }
 
           case "current": {
@@ -222,7 +273,11 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             if (tickets.length === 0) {
               return ok("No ticket is attached to this thread");
             }
-            return ok(tickets.map(detail).join("\n\n"));
+            return ok(
+              tickets
+                .map((ticket) => detail(ticket, childrenOf(ticket)))
+                .join("\n\n"),
+            );
           }
 
           case "create": {
@@ -230,8 +285,13 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             if (title === "") {
               return fail("Usage: bb tickets create <title>");
             }
+            const projectId = projectOf();
+            const parentRef = flagString(flags, "parent");
             const id = await ops.create({
-              projectId: projectOf(),
+              projectId,
+              ...(parentRef === undefined
+                ? {}
+                : { parentId: resolve(projectId, parentRef).id }),
               title,
               description: flagString(flags, "description") ?? "",
             });
@@ -327,6 +387,7 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
               flags["separate"] === true,
               target,
               worktree,
+              flagString(flags, "notes"),
             );
             return ok(
               json

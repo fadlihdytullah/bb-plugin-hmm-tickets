@@ -16,6 +16,7 @@ export const ticketSchema = z
   .object({
     id: z.string(),
     projectId: z.string(),
+    parentId: z.string().nullable(),
     title: z.string(),
     description: z.string(),
     status: statusSchema,
@@ -35,4 +36,18 @@ export function splitDraft(text: string): { title: string; description: string }
     title: trimmed.slice(0, newline).trim(),
     description: trimmed.slice(newline + 1).trim(),
   };
+}
+
+export function progressOf(children: readonly Ticket[]): {
+  done: number;
+  total: number;
+} {
+  return {
+    done: children.filter((child) => child.status === "done").length,
+    total: children.length,
+  };
+}
+
+export function plural(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }

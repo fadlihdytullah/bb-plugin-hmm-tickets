@@ -1,11 +1,12 @@
 import {
   useCallback,
   useEffect,
+  useId,
   useRef,
   useState,
   useSyncExternalStore,
 } from "react";
-import type { PointerEvent as ReactPointerEvent } from "react";
+import type { ReactNode, RefObject } from "react";
 import {
   definePluginApp,
   Markdown,
@@ -33,6 +34,8 @@ import {
   CircleIcon,
   DashedLineCircleIcon,
   Delete02Icon,
+  Download01Icon,
+  DragDropVerticalIcon,
   Edit02Icon,
   FolderIcon,
   Loading03Icon,
@@ -44,14 +47,23 @@ import {
 import { toast } from "sonner";
 import type { rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
-import { clampSize, loadSize, saveSize, type Size } from "@/lib/frame";
 import {
+  plural,
+  progressOf,
   splitDraft,
   STATUS_LABEL,
   STATUSES,
   type Status,
   type Ticket,
 } from "@/lib/status";
+import {
+  ago,
+  longDate,
+  perDay,
+  shortDate,
+  summaryMarkdown,
+  type DoneItem,
+} from "@/lib/summary";
 import { cn } from "@/lib/utils";
 
 const TOGGLE_EVENT = "hmm-tickets:toggle";
@@ -63,6 +75,7 @@ let composeProjectId: string | null = null;
 const composeListeners = new Set<() => void>();
 
 function setComposeProject(next: string | null): void {
+  if (composeProjectId === next) return;
   composeProjectId = next;
   for (const listener of composeListeners) listener();
 }
@@ -161,6 +174,57 @@ function useTickets(
   return tickets;
 }
 
+function InlineTitleInput({
+  value,
+  label,
+  className,
+  onDone,
+}: {
+  value: string;
+  label: string;
+  className?: string;
+  onDone: (title: string | null) => void;
+}) {
+  const [draft, setDraft] = useState(value);
+  const finished = useRef(false);
+
+  const finish = (save: boolean) => {
+    if (finished.current) return;
+    finished.current = true;
+    const title = draft.trim();
+    onDone(save && title !== "" && title !== value ? title : null);
+  };
+
+  return (
+    <input
+      aria-label={label}
+      autoFocus
+      className={cn(
+        "min-w-0 flex-1 rounded bg-transparent px-1 outline-none ring-1 ring-ring/40",
+        className,
+      )}
+      data-inline-edit=""
+      maxLength={200}
+      onBlur={() => finish(true)}
+      onChange={(event) => setDraft(event.currentTarget.value)}
+      onClick={(event) => event.stopPropagation()}
+      onFocus={(event) => event.currentTarget.select()}
+      onKeyDown={(event) => {
+        event.stopPropagation();
+        if (event.key === "Enter") {
+          event.preventDefault();
+          finish(true);
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          finish(false);
+        }
+      }}
+      value={draft}
+    />
+  );
+}
+
 function ThreadBadge({ ticket }: { ticket: Ticket }) {
   const navigate = useBbNavigate();
   if (ticket.threadId === null) return null;
@@ -192,19 +256,40 @@ function ThreadBadge({ ticket }: { ticket: Ticket }) {
 
 function TicketRow({
   ticket,
+  progress,
   selected,
+  soleSelected,
+  editing,
+  onEdit,
+  onEditDone,
   onSelect,
   onOpen,
   onMenu,
   onStatusMenu,
 }: {
   ticket: Ticket;
+  progress: { done: number; total: number };
   selected: boolean;
+  soleSelected: boolean;
+  editing: boolean;
+  onEdit: () => void;
+  onEditDone: (title: string | null) => void;
   onSelect: (event: React.MouseEvent) => void;
   onOpen: () => void;
   onMenu: (x: number, y: number) => void;
   onStatusMenu: (x: number, y: number) => void;
 }) {
+  const selectedAt = useRef(0);
+  const editedAt = useRef(0);
+
+  useEffect(() => {
+    if (selected) selectedAt.current = Date.now();
+  }, [selected]);
+
+  useEffect(() => {
+    if (editing) editedAt.current = Date.now();
+  }, [editing]);
+
   return (
     <div
       aria-selected={selected}
@@ -220,6 +305,7 @@ function TicketRow({
         onMenu(event.clientX, event.clientY);
       }}
       onDoubleClick={(event) => {
+        if (editing && Date.now() - editedAt.current > 500) return;
         event.preventDefault();
         onOpen();
       }}
@@ -240,19 +326,46 @@ function TicketRow({
           className={STATUS_TONE[ticket.status]}
         />
       </button>
-      <span
-        className={cn(
-          "min-w-0 flex-1 truncate text-[13px] leading-5",
-          ticket.status === "done" && "text-muted-foreground",
-        )}
-      >
-        {ticket.title}
-      </span>
+      {editing ? (
+        <InlineTitleInput
+          className="text-[13px] leading-5"
+          label="Ticket title"
+          onDone={onEditDone}
+          value={ticket.title}
+        />
+      ) : (
+        <span
+          className={cn(
+            "min-w-0 flex-1 truncate text-[13px] leading-5",
+            ticket.status === "done" && "text-muted-foreground",
+            soleSelected && "cursor-text",
+          )}
+          onClick={(event) => {
+            const additive = event.metaKey || event.ctrlKey || event.shiftKey;
+            if (!soleSelected || additive) return;
+            if (Date.now() - selectedAt.current < 500) return;
+            event.stopPropagation();
+            onEdit();
+          }}
+        >
+          {ticket.title}
+        </span>
+      )}
       {ticket.description.trim() === "" ? null : (
         <span
           aria-hidden="true"
           className="size-1 shrink-0 rounded-full bg-muted-foreground/30"
         />
+      )}
+      {progress.total === 0 ? null : (
+        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
+          <span aria-hidden="true">
+            {progress.done}/{progress.total}
+          </span>
+          <span className="sr-only">
+            {progress.done} of {plural(progress.total, "sub-task")} done
+          </span>
+        </span>
       )}
       <ThreadBadge ticket={ticket} />
       <button
@@ -377,6 +490,8 @@ function TicketMenu({
   menu,
   threadId,
   onClose,
+  onOpen,
+  onRename,
   onSend,
   onStatus,
   onArchive,
@@ -385,6 +500,8 @@ function TicketMenu({
   menu: Menu | null;
   threadId: string | null;
   onClose: () => void;
+  onOpen: (ticket: Ticket) => void;
+  onRename: (ticket: Ticket) => void;
   onSend: (tickets: Ticket[], target: SendTarget) => void;
   onStatus: (tickets: Ticket[], status: Status) => void;
   onArchive: (tickets: Ticket[], archived: boolean) => void;
@@ -399,6 +516,8 @@ function TicketMenu({
     tickets.every((ticket) => ticket.status === status),
   );
   const statusOnly = menu?.only === "status";
+  const renaming = useRef(false);
+  const single = count === 1 ? tickets[0] : undefined;
 
   const statusItems = STATUSES.map((status) => (
     <DropdownMenu.Item
@@ -432,6 +551,11 @@ function TicketMenu({
       <DropdownMenu.Content
         align="start"
         className={MENU_CONTENT}
+        onCloseAutoFocus={(event) => {
+          if (!renaming.current) return;
+          renaming.current = false;
+          event.preventDefault();
+        }}
         side="bottom"
         sideOffset={0}
       >
@@ -439,6 +563,28 @@ function TicketMenu({
           statusItems
         ) : (
           <>
+            {single === undefined ? null : (
+              <>
+                <DropdownMenu.Item
+                  className={MENU_ITEM}
+                  onSelect={() => onOpen(single)}
+                >
+                  <Glyph icon={ArrowRight01Icon} />
+                  Open
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className={MENU_ITEM}
+                  onSelect={() => {
+                    renaming.current = true;
+                    onRename(single);
+                  }}
+                >
+                  <Glyph icon={Edit02Icon} />
+                  Rename
+                </DropdownMenu.Item>
+                <DropdownMenu.Separator className="my-1 h-px bg-border" />
+              </>
+            )}
             {allArchived ? null : (
               <>
                 <DropdownMenu.Item
@@ -601,17 +747,531 @@ function StatusSelect({
   );
 }
 
+function Reveal({
+  animate,
+  children,
+}: {
+  animate: boolean;
+  children: ReactNode;
+}) {
+  const [shown, setShown] = useState(!animate);
+
+  useEffect(() => {
+    if (shown) return;
+    const frame = requestAnimationFrame(() => setShown(true));
+    return () => cancelAnimationFrame(frame);
+  }, [shown]);
+
+  return (
+    <div
+      className={cn(
+        "grid transition-[grid-template-rows,opacity] duration-200 ease-out motion-reduce:transition-none",
+        shown ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0",
+      )}
+    >
+      <div className="min-h-0 overflow-hidden">{children}</div>
+    </div>
+  );
+}
+
+function ProgressSummary({
+  done,
+  total,
+  onJump,
+}: {
+  done: number;
+  total: number;
+  onJump: () => void;
+}) {
+  const percent = Math.round((done / total) * 100);
+  return (
+    <div className="mt-2 flex items-center gap-2">
+      <span
+        aria-label="Sub-task progress"
+        aria-valuemax={total}
+        aria-valuemin={0}
+        aria-valuenow={done}
+        aria-valuetext={`${done} of ${plural(total, "sub-task")} done`}
+        className="h-1 flex-1 overflow-hidden rounded-full bg-muted"
+        role="progressbar"
+      >
+        <span
+          className="block h-full rounded-full bg-emerald-500 transition-[width] duration-300 ease-out motion-reduce:transition-none"
+          style={{ width: `${percent}%` }}
+        />
+      </span>
+      <button
+        className="rounded px-1 text-[11px] tabular-nums text-muted-foreground transition-colors hover:text-foreground"
+        onClick={onJump}
+        type="button"
+      >
+        {done} of {total} done
+      </button>
+    </div>
+  );
+}
+
+type RowDrag = {
+  dragging: boolean;
+  edge: "before" | "after" | null;
+  onDragStart: (event: React.DragEvent) => void;
+  onDragOver: (event: React.DragEvent) => void;
+  onDrop: (event: React.DragEvent) => void;
+  onDragEnd: () => void;
+  onMove: (delta: number) => void;
+};
+
+function SubTaskMenuItems({
+  item,
+  onOpen,
+  onRename,
+  onStatus,
+  onDelete,
+}: {
+  item: Ticket;
+  onOpen: (item: Ticket) => void;
+  onRename: () => void;
+  onStatus: (item: Ticket, status: Status) => void;
+  onDelete: (item: Ticket) => void;
+}) {
+  return (
+    <>
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onOpen(item)}>
+        <Glyph icon={ArrowRight01Icon} />
+        Open
+      </DropdownMenu.Item>
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={onRename}>
+        <Glyph icon={Edit02Icon} />
+        Rename
+      </DropdownMenu.Item>
+      <DropdownMenu.Separator className="my-1 h-px bg-border" />
+      {STATUSES.map((status) => (
+        <DropdownMenu.Item
+          className={MENU_ITEM}
+          key={status}
+          onSelect={() => onStatus(item, status)}
+        >
+          <Glyph icon={STATUS_ICON[status]} className={STATUS_TONE[status]} />
+          <span className="flex-1">{STATUS_LABEL[status]}</span>
+          {item.status === status ? (
+            <Glyph icon={Tick02Icon} className="size-3 text-muted-foreground" />
+          ) : null}
+        </DropdownMenu.Item>
+      ))}
+      <DropdownMenu.Separator className="my-1 h-px bg-border" />
+      <DropdownMenu.Item
+        className={cn(MENU_ITEM, "text-destructive")}
+        onSelect={() => onDelete(item)}
+      >
+        <Glyph icon={Delete02Icon} />
+        Delete
+      </DropdownMenu.Item>
+    </>
+  );
+}
+
+function SubTaskRow({
+  item,
+  drag,
+  onOpen,
+  onRename,
+  onStatus,
+  onDelete,
+}: {
+  item: Ticket;
+  drag: RowDrag;
+  onOpen: (item: Ticket) => void;
+  onRename: (item: Ticket, title: string) => void;
+  onStatus: (item: Ticket, status: Status) => void;
+  onDelete: (item: Ticket) => void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [pointer, setPointer] = useState<{ x: number; y: number } | null>(
+    null,
+  );
+  const editedAt = useRef(0);
+  const renaming = useRef(false);
+
+  const startEdit = () => {
+    editedAt.current = Date.now();
+    setEditing(true);
+  };
+
+  const rename = () => {
+    renaming.current = true;
+    startEdit();
+  };
+
+  const keepFocus = (event: Event) => {
+    if (!renaming.current) return;
+    renaming.current = false;
+    event.preventDefault();
+  };
+
+  return (
+    <div
+      className={cn(
+        "group flex h-[30px] items-center gap-1 rounded-md border-y border-transparent pl-0.5 pr-1 transition-colors hover:bg-state-hover",
+        drag.dragging && "opacity-40",
+        drag.edge === "before" && "border-t-ring",
+        drag.edge === "after" && "border-b-ring",
+      )}
+      draggable={!editing}
+      onContextMenu={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        setPointer({ x: event.clientX, y: event.clientY });
+      }}
+      onDoubleClick={(event) => {
+        if ((event.target as HTMLElement).closest("[data-no-open]")) return;
+        if (editing && Date.now() - editedAt.current > 500) return;
+        event.preventDefault();
+        onOpen(item);
+      }}
+      onDragEnd={drag.onDragEnd}
+      onDragOver={drag.onDragOver}
+      onDragStart={drag.onDragStart}
+      onDrop={drag.onDrop}
+    >
+      <button
+        aria-label={`Reorder ${item.title}. Use arrow up and down to move.`}
+        className="flex h-6 w-4 shrink-0 cursor-grab items-center justify-center rounded text-muted-foreground/40 opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 active:cursor-grabbing motion-reduce:transition-none"
+        data-handle={item.id}
+        data-no-open=""
+        onKeyDown={(event) => {
+          if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+          event.preventDefault();
+          event.stopPropagation();
+          drag.onMove(event.key === "ArrowDown" ? 1 : -1);
+        }}
+        type="button"
+      >
+        <Glyph icon={DragDropVerticalIcon} className="size-3" />
+      </button>
+      <button
+        aria-checked={
+          item.status === "done"
+            ? true
+            : item.status === "in_progress"
+              ? "mixed"
+              : false
+        }
+        aria-label={item.title}
+        className="flex size-6 shrink-0 items-center justify-center rounded transition-[background-color,transform] duration-150 ease-out hover:bg-state-active active:scale-90 motion-reduce:transition-none"
+        data-no-open=""
+        onClick={() =>
+          onStatus(item, item.status === "done" ? "todo" : "done")
+        }
+        role="checkbox"
+        type="button"
+      >
+        <Glyph
+          icon={STATUS_ICON[item.status]}
+          className={STATUS_TONE[item.status]}
+        />
+      </button>
+      {editing ? (
+        <InlineTitleInput
+          className="text-[13px] leading-5"
+          label="Sub-task title"
+          onDone={(title) => {
+            setEditing(false);
+            if (title !== null) onRename(item, title);
+          }}
+          value={item.title}
+        />
+      ) : (
+        <button
+          className={cn(
+            "min-w-0 flex-1 cursor-text truncate rounded px-1 text-left text-[13px] leading-5",
+            item.status === "done" && "text-muted-foreground",
+          )}
+          onClick={startEdit}
+          type="button"
+        >
+          {item.title}
+        </button>
+      )}
+      <ThreadBadge ticket={item} />
+      <DropdownMenu.Root modal={false}>
+        <DropdownMenu.Trigger asChild>
+          <button
+            aria-label={`Actions for ${item.title}`}
+            className="flex size-6 shrink-0 items-center justify-center rounded text-muted-foreground opacity-0 transition-opacity hover:bg-state-active hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 data-[state=open]:opacity-100"
+            data-no-open=""
+            type="button"
+          >
+            <Glyph icon={MoreHorizontalIcon} />
+          </button>
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content
+          align="end"
+          className={MENU_CONTENT}
+          onCloseAutoFocus={keepFocus}
+          side="bottom"
+          sideOffset={4}
+        >
+          <SubTaskMenuItems
+            item={item}
+            onDelete={onDelete}
+            onOpen={onOpen}
+            onRename={rename}
+            onStatus={onStatus}
+          />
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+      <DropdownMenu.Root
+        modal={false}
+        onOpenChange={(open) => {
+          if (!open) setPointer(null);
+        }}
+        open={pointer !== null}
+      >
+        <DropdownMenu.Trigger asChild>
+          <span
+            aria-hidden="true"
+            className="pointer-events-none fixed size-0"
+            style={{ left: pointer?.x ?? 0, top: pointer?.y ?? 0 }}
+          />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content
+          align="start"
+          className={MENU_CONTENT}
+          onCloseAutoFocus={keepFocus}
+          side="bottom"
+          sideOffset={0}
+        >
+          <SubTaskMenuItems
+            item={item}
+            onDelete={onDelete}
+            onOpen={onOpen}
+            onRename={rename}
+            onStatus={onStatus}
+          />
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+    </div>
+  );
+}
+
+function SubTasks({
+  items,
+  sectionRef,
+  onAdd,
+  onReorder,
+  onOpen,
+  onRename,
+  onStatus,
+  onDelete,
+}: {
+  items: Ticket[];
+  sectionRef: RefObject<HTMLElement | null>;
+  onAdd: (title: string) => Promise<void>;
+  onReorder: (ids: string[]) => Promise<void>;
+  onOpen: (item: Ticket) => void;
+  onRename: (item: Ticket, title: string) => void;
+  onStatus: (item: Ticket, status: Status) => void;
+  onDelete: (item: Ticket) => void;
+}) {
+  const initial = useRef(new Set(items.map((item) => item.id)));
+  const [value, setValue] = useState("");
+  const [local, setLocal] = useState<string[] | null>(null);
+  const [dragId, setDragId] = useState<string | null>(null);
+  const [over, setOver] = useState<{ id: string; after: boolean } | null>(null);
+  const [moved, setMoved] = useState("");
+  const refocus = useRef<string | null>(null);
+  const { done, total } = progressOf(items);
+
+  const shown =
+    local === null
+      ? items
+      : [...items].sort((a, b) => {
+          const left = local.indexOf(a.id);
+          const right = local.indexOf(b.id);
+          return (left === -1 ? local.length : left) - (right === -1 ? local.length : right);
+        });
+
+  useEffect(() => {
+    setLocal(null);
+  }, [items]);
+
+  useEffect(() => {
+    const id = refocus.current;
+    if (id === null) return;
+    refocus.current = null;
+    sectionRef.current
+      ?.querySelector<HTMLElement>(`[data-handle="${id}"]`)
+      ?.focus();
+  });
+
+  const commit = (ids: string[]) => {
+    setLocal(ids);
+    onReorder(ids).catch(() => setLocal(null));
+  };
+
+  const place = (id: string, target: string, after: boolean) => {
+    const rest = shown.map((one) => one.id).filter((one) => one !== id);
+    const at = rest.indexOf(target) + (after ? 1 : 0);
+    const next = [...rest.slice(0, at), id, ...rest.slice(at)];
+    if (next.every((one, index) => one === shown[index]?.id)) return;
+    commit(next);
+  };
+
+  const step = (id: string, delta: number) => {
+    const ids = shown.map((one) => one.id);
+    const from = ids.indexOf(id);
+    const to = from + delta;
+    if (to < 0 || to >= ids.length) return;
+    ids.splice(to, 0, ...ids.splice(from, 1));
+    refocus.current = id;
+    setMoved(
+      `${shown[from]?.title ?? ""} moved to position ${to + 1} of ${ids.length}`,
+    );
+    window.setTimeout(() => setMoved(""), 1500);
+    commit(ids);
+  };
+
+  const submit = async () => {
+    const title = value.trim();
+    if (title === "") return;
+    setValue("");
+    await onAdd(title);
+  };
+
+  return (
+    <section
+      aria-labelledby="subtasks-heading"
+      className="mt-5 scroll-mt-2"
+      ref={sectionRef}
+    >
+      <div className="mb-1 flex items-center gap-2 px-1">
+        <h3
+          className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground"
+          id="subtasks-heading"
+        >
+          Sub-tasks
+        </h3>
+        {total === 0 ? null : (
+          <span
+            aria-hidden="true"
+            className="text-[10px] tabular-nums text-muted-foreground/50"
+          >
+            {done}/{total}
+          </span>
+        )}
+      </div>
+      {total === 0 ? (
+        <p className="px-1 pb-1 text-[11px] text-muted-foreground/60">
+          No sub-tasks yet
+        </p>
+      ) : (
+        <ul className="-mx-1">
+          {shown.map((item) => (
+            <li key={item.id}>
+              <Reveal animate={!initial.current.has(item.id)}>
+                <SubTaskRow
+                  drag={{
+                    dragging: dragId === item.id,
+                    edge:
+                      over?.id === item.id && dragId !== item.id
+                        ? over.after
+                          ? "after"
+                          : "before"
+                        : null,
+                    onDragStart: (event) => {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("text/plain", item.id);
+                      setDragId(item.id);
+                    },
+                    onDragOver: (event) => {
+                      if (dragId === null) return;
+                      event.preventDefault();
+                      const box = event.currentTarget.getBoundingClientRect();
+                      const after = event.clientY > box.top + box.height / 2;
+                      setOver((current) =>
+                        current?.id === item.id && current.after === after
+                          ? current
+                          : { id: item.id, after },
+                      );
+                    },
+                    onDrop: (event) => {
+                      event.preventDefault();
+                      if (dragId !== null && over !== null) {
+                        place(dragId, over.id, over.after);
+                      }
+                      setDragId(null);
+                      setOver(null);
+                    },
+                    onDragEnd: () => {
+                      setDragId(null);
+                      setOver(null);
+                    },
+                    onMove: (delta) => step(item.id, delta),
+                  }}
+                  item={item}
+                  onDelete={onDelete}
+                  onOpen={onOpen}
+                  onRename={onRename}
+                  onStatus={onStatus}
+                />
+              </Reveal>
+            </li>
+          ))}
+        </ul>
+      )}
+      <div className="-mx-1 flex h-[30px] items-center gap-1.5 rounded-md pl-1 pr-1.5 focus-within:bg-state-hover">
+        <span className="flex size-6 shrink-0 items-center justify-center">
+          <Glyph icon={Add01Icon} className="text-muted-foreground" />
+        </span>
+        <input
+          aria-label="Add a sub-task"
+          className="min-w-0 flex-1 bg-transparent text-[13px] leading-5 outline-none placeholder:text-muted-foreground/50"
+          maxLength={200}
+          onChange={(event) => setValue(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === "Enter") {
+              event.preventDefault();
+              event.stopPropagation();
+              void submit();
+            }
+            if (event.key === "Escape" && value !== "") {
+              event.preventDefault();
+              event.stopPropagation();
+              setValue("");
+            }
+          }}
+          placeholder="Add a sub-task"
+          value={value}
+        />
+      </div>
+      <span aria-live="polite" className="sr-only">
+        {moved !== ""
+          ? moved
+          : total === 0
+            ? ""
+            : `${done} of ${plural(total, "sub-task")} done`}
+      </span>
+    </section>
+  );
+}
+
 function TicketForm({
   ticket,
+  parent,
+  subtasks,
   projectId,
   onBack,
+  onOpenTicket,
   onSend,
   onArchive,
   onDelete,
 }: {
   ticket: Ticket | null;
+  parent: Ticket | null;
+  subtasks: Ticket[];
   projectId: string;
   onBack: () => void;
+  onOpenTicket: (id: string) => void;
   onSend: (ticket: Ticket) => void;
   onArchive: (ticket: Ticket) => void;
   onDelete: (ticket: Ticket) => void;
@@ -620,6 +1280,8 @@ function TicketForm({
   const [editing, setEditing] = useState(ticket === null);
   const [title, setTitle] = useState(ticket?.title ?? "");
   const [description, setDescription] = useState(ticket?.description ?? "");
+  const subtasksRef = useRef<HTMLElement>(null);
+  const [titleEditing, setTitleEditing] = useState(false);
 
   const run = async (task: () => Promise<unknown>) => {
     try {
@@ -640,6 +1302,56 @@ function TicketForm({
       await rpc.call("update", { ids: [ticket.id], title, description });
       setEditing(false);
     });
+
+  const addSubtask = (subtitle: string) =>
+    run(async () => {
+      if (ticket === null) return;
+      await rpc.call("create", {
+        projectId,
+        parentId: ticket.id,
+        title: subtitle,
+      });
+    });
+
+  const reorderSubtasks = async (ids: string[]) => {
+    if (ticket === null) return;
+    try {
+      await rpc.call("reorder", { parentId: ticket.id, ids });
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed");
+      throw error;
+    }
+  };
+
+  const setSubtaskStatus = (item: Ticket, status: Status) =>
+    run(async () => {
+      await rpc.call("update", { ids: [item.id], status });
+      if (
+        ticket === null ||
+        status !== "done" ||
+        ticket.status === "done" ||
+        !subtasks.every((one) => one.id === item.id || one.status === "done")
+      ) {
+        return;
+      }
+      toast("All sub-tasks done", {
+        action: {
+          label: "Mark done",
+          onClick: () =>
+            void run(() =>
+              rpc.call("update", { ids: [ticket.id], status: "done" }),
+            ),
+        },
+      });
+    });
+
+  const jumpToSubtasks = () => {
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)");
+    subtasksRef.current?.scrollIntoView({
+      behavior: reduced.matches ? "auto" : "smooth",
+      block: "start",
+    });
+  };
 
   const cancel = () => {
     if (ticket === null) {
@@ -668,6 +1380,7 @@ function TicketForm({
           return;
         }
         if (event.key === "Escape") {
+          if (document.querySelector('[role="menu"]') !== null) return;
           event.preventDefault();
           if (editing) cancel();
           else onBack();
@@ -680,6 +1393,16 @@ function TicketForm({
           SCROLLBAR,
         )}
       >
+        {parent === null ? null : (
+          <button
+            className="-ml-1 mb-1 flex max-w-full items-center gap-1 rounded px-1 text-[11px] text-muted-foreground transition-colors hover:text-foreground"
+            onClick={() => onOpenTicket(parent.id)}
+            type="button"
+          >
+            <Glyph icon={ArrowLeft01Icon} className="size-3" />
+            <span className="truncate">{parent.title}</span>
+          </button>
+        )}
         {editing ? (
           <>
             <input
@@ -699,9 +1422,38 @@ function TicketForm({
           </>
         ) : (
           <>
-            <h2 className="text-[15px] font-semibold leading-6 tracking-tight">
-              {title}
-            </h2>
+            {titleEditing ? (
+              <InlineTitleInput
+                className="w-full text-[15px] font-semibold leading-6 tracking-tight"
+                label="Ticket title"
+                onDone={(next) => {
+                  setTitleEditing(false);
+                  if (next === null || ticket === null) return;
+                  setTitle(next);
+                  void run(() =>
+                    rpc.call("update", { ids: [ticket.id], title: next }),
+                  );
+                }}
+                value={title}
+              />
+            ) : (
+              <h2 className="text-[15px] font-semibold leading-6 tracking-tight">
+                <button
+                  className="w-full cursor-text rounded text-left"
+                  onClick={() => setTitleEditing(true)}
+                  type="button"
+                >
+                  {title}
+                </button>
+              </h2>
+            )}
+            {subtasks.length === 0 ? null : (
+              <ProgressSummary
+                done={progressOf(subtasks).done}
+                onJump={jumpToSubtasks}
+                total={subtasks.length}
+              />
+            )}
             {description.trim() === "" ? (
               <p className="mt-2.5 text-[13px] text-muted-foreground/50">
                 No description
@@ -710,6 +1462,20 @@ function TicketForm({
               <Markdown
                 className="mt-2.5 text-[13px] leading-relaxed"
                 content={description}
+              />
+            )}
+            {ticket === null || ticket.parentId !== null ? null : (
+              <SubTasks
+                items={subtasks}
+                onAdd={addSubtask}
+                onDelete={onDelete}
+                onOpen={(item) => onOpenTicket(item.id)}
+                onRename={(item, name) =>
+                  void run(() => rpc.call("update", { ids: [item.id], title: name }))
+                }
+                onReorder={reorderSubtasks}
+                onStatus={(item, status) => void setSubtaskStatus(item, status)}
+                sectionRef={subtasksRef}
               />
             )}
           </>
@@ -782,13 +1548,15 @@ function TicketForm({
                 side="top"
                 sideOffset={6}
               >
-                <DropdownMenu.Item
-                  className={MENU_ITEM}
-                  onSelect={() => onArchive(ticket)}
-                >
-                  <Glyph icon={Archive03Icon} />
-                  {ticket.archived ? "Unarchive" : "Archive"}
-                </DropdownMenu.Item>
+                {ticket.parentId !== null ? null : (
+                  <DropdownMenu.Item
+                    className={MENU_ITEM}
+                    onSelect={() => onArchive(ticket)}
+                  >
+                    <Glyph icon={Archive03Icon} />
+                    {ticket.archived ? "Unarchive" : "Archive"}
+                  </DropdownMenu.Item>
+                )}
                 <DropdownMenu.Item
                   className={cn(MENU_ITEM, "text-destructive")}
                   onSelect={() => onDelete(ticket)}
@@ -837,20 +1605,292 @@ function EmptyState({
   );
 }
 
+function NotesPrompt({
+  tickets,
+  notes,
+  onChange,
+  onCancel,
+  onConfirm,
+}: {
+  tickets: Ticket[];
+  notes: string;
+  onChange: (next: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <div className="absolute inset-0 z-[60] flex flex-col justify-end bg-background/70 backdrop-blur-[2px]">
+      <div
+        className="flex flex-col gap-2 border-t border-border bg-card p-3 shadow-2xl"
+        onKeyDown={(event) => {
+          event.stopPropagation();
+          const mod = IS_MAC ? event.metaKey : event.ctrlKey;
+          if (mod && event.key === "Enter") {
+            event.preventDefault();
+            onConfirm();
+          }
+          if (event.key === "Escape") {
+            event.preventDefault();
+            onCancel();
+          }
+        }}
+      >
+        <p className="text-[11px] text-muted-foreground">
+          Notes for{" "}
+          <span className="text-foreground">
+            {tickets.length === 1
+              ? (tickets[0]?.title ?? "")
+              : `${tickets.length} tickets`}
+          </span>
+        </p>
+        <textarea
+          autoFocus
+          className="h-24 w-full resize-none rounded-md border border-input bg-transparent px-2 py-1.5 text-[13px] leading-relaxed outline-none placeholder:text-muted-foreground/50 focus:ring-1 focus:ring-ring"
+          onChange={(event) => onChange(event.currentTarget.value)}
+          placeholder="Anything the agent should know…"
+          value={notes}
+        />
+        <div className="flex items-center justify-end gap-1.5">
+          <Button
+            className="h-7 rounded-md px-2.5 text-xs"
+            onClick={onCancel}
+            size="sm"
+            variant="ghost"
+          >
+            Cancel
+          </Button>
+          <Button
+            aria-keyshortcuts="Meta+Enter Control+Enter"
+            className="h-7 rounded-md px-3 text-xs"
+            onClick={onConfirm}
+            size="sm"
+          >
+            <Glyph icon={BotIcon} className="size-3.5" />
+            Send
+          </Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Dialog({
+  label,
+  focusKey,
+  onClose,
+  onEscape,
+  children,
+}: {
+  label: string;
+  focusKey: string;
+  onClose: () => void;
+  onEscape: () => void;
+  children: ReactNode;
+}) {
+  const panelRef = useRef<HTMLDivElement>(null);
+  const [shown, setShown] = useState(false);
+  const [settled, setSettled] = useState(false);
+
+  useEffect(() => {
+    const previous = document.activeElement as HTMLElement | null;
+    const frame = requestAnimationFrame(() => setShown(true));
+    const timer = window.setTimeout(() => setSettled(true), 260);
+    return () => {
+      cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+      if (previous?.isConnected) previous.focus();
+    };
+  }, []);
+
+  useEffect(() => {
+    const panel = panelRef.current;
+    if (panel !== null && !panel.contains(document.activeElement)) {
+      panel.focus();
+    }
+  }, [focusKey]);
+
+  const trap = (event: React.KeyboardEvent) => {
+    const panel = panelRef.current;
+    if (event.key !== "Tab" || panel === null) return;
+    const nodes = Array.from(
+      panel.querySelectorAll<HTMLElement>(
+        'a[href],button:not([disabled]),input:not([disabled]),textarea:not([disabled]),[tabindex]:not([tabindex="-1"])',
+      ),
+    );
+    const first = nodes[0];
+    const last = nodes.at(-1);
+    const active = document.activeElement;
+    if (first === undefined || last === undefined) return;
+    if (event.shiftKey && (active === first || active === panel)) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && active === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  };
+
+  return (
+    <div
+      className={cn(
+        "fixed inset-0 z-50 flex items-center justify-center bg-background/60 p-4 backdrop-blur-[2px] transition-opacity duration-150 ease-out motion-reduce:transition-none",
+        shown ? "opacity-100" : "opacity-0",
+      )}
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div
+        aria-label={label}
+        aria-modal="true"
+        className={cn(
+          "relative flex h-[min(44rem,calc(100vh-4rem))] w-[min(40rem,100%)] flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl outline-none transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none",
+          settled
+            ? ""
+            : shown
+              ? "scale-100 opacity-100"
+              : "scale-[0.97] opacity-0",
+        )}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          if (document.querySelector('[role="menu"]') !== null) return;
+          event.preventDefault();
+          onEscape();
+        }}
+        onKeyDownCapture={trap}
+        ref={panelRef}
+        role="dialog"
+        tabIndex={-1}
+      >
+        {children}
+      </div>
+    </div>
+  );
+}
+
 function TicketsWindow() {
-  const rpc = useRpc<typeof rpcContract>();
-  const bbContext = useBbContext();
-  const routeProjectId = bbContext.projectId;
-  const routeThreadId = bbContext.threadId;
+  const routeProjectId = useBbContext().projectId;
   const composedProjectId = useSyncExternalStore(
     subscribeComposeProject,
     () => composeProjectId,
   );
-  const projectId = routeProjectId ?? composedProjectId;
-  const [openProjects, setOpenProjects] = useState<ReadonlySet<string>>(
-    () => new Set(),
+  const resolvedProjectId = routeProjectId ?? composedProjectId;
+  const [lastProjectId, setLastProjectId] = useState<string | null>(null);
+  const projectId = resolvedProjectId ?? lastProjectId;
+  const [open, setOpen] = useState(false);
+  const [home, setHome] = useState(false);
+  const [picked, setPicked] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (resolvedProjectId === null) return;
+    setLastProjectId(resolvedProjectId);
+    setPicked(null);
+    setHome(false);
+  }, [resolvedProjectId]);
+
+  const toggle = useCallback(() => {
+    setOpen((current) => !current);
+    setPicked(null);
+    setHome(projectId === null);
+  }, [projectId]);
+
+  const close = useCallback(() => setOpen(false), []);
+
+  useEffect(() => {
+    window.addEventListener(TOGGLE_EVENT, toggle);
+    return () => window.removeEventListener(TOGGLE_EVENT, toggle);
+  }, [toggle]);
+
+  if (!open) return null;
+  return (
+    <TicketsContent
+      home={home || (picked ?? projectId) === null}
+      onClose={close}
+      onHome={() => setHome(true)}
+      onPick={(id) => {
+        setPicked(id);
+        setHome(false);
+      }}
+      projectId={picked ?? projectId}
+    />
   );
-  const isOpen = projectId !== null && openProjects.has(projectId);
+}
+
+function TicketsContent({
+  home,
+  projectId,
+  onClose,
+  onHome,
+  onPick,
+}: {
+  home: boolean;
+  projectId: string | null;
+  onClose: () => void;
+  onHome: () => void;
+  onPick: (id: string) => void;
+}) {
+  const projects = useProjects();
+  if (home || projectId === null) {
+    return (
+      <Dialog focusKey="home" label="Tickets" onClose={onClose} onEscape={onClose}>
+        <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border pl-4 pr-1.5">
+          <span className="flex-1 truncate text-xs font-semibold tracking-tight">
+            All projects
+          </span>
+          <Button
+            aria-label="Close tickets"
+            className={ICON_BUTTON}
+            onClick={onClose}
+            size="icon"
+            variant="ghost"
+          >
+            <Glyph icon={Cancel01Icon} />
+          </Button>
+        </div>
+        <div className={cn("min-h-0 flex-1 space-y-6 overflow-y-auto p-4", SCROLLBAR)}>
+          <StatsPanel projects={projects} />
+          <ProjectList onOpen={onPick} projects={projects} />
+        </div>
+      </Dialog>
+    );
+  }
+  return (
+    <TicketsBoard
+      key={projectId}
+      onClose={onClose}
+      onHome={onHome}
+      projectId={projectId}
+      title={projects?.find((one) => one.id === projectId)?.name ?? "Tickets"}
+    />
+  );
+}
+
+type ShellProps = {
+  label: string;
+  focusKey: string;
+  onClose: () => void;
+  onEscape: () => void;
+  children: ReactNode;
+};
+
+function TicketsBoard({
+  projectId,
+  onClose,
+  onHome,
+  title,
+}: {
+  projectId: string;
+  onClose: () => void;
+  onHome: () => void;
+  title: string;
+}) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const bbContext = useBbContext();
+  const routeThreadId = bbContext.threadId;
+  const routeProjectId = bbContext.projectId;
+  const Shell = Dialog;
+  const close = onClose;
   const [showArchived, setShowArchived] = useState(false);
   const [view, setView] = useState<View>({ kind: "list" });
   const [menu, setMenu] = useState<Menu | null>(null);
@@ -863,23 +1903,34 @@ function TicketsWindow() {
   );
   const [query, setQuery] = useState("");
   const [quickAdd, setQuickAdd] = useState(false);
+  const [renamingId, setRenamingId] = useState<string | null>(null);
   const [worktree, setWorktree] = useState(false);
-  const [size, setSize] = useState<Size>(() =>
-    loadSize(window.innerWidth, window.innerHeight),
-  );
+  const [askNotes, setAskNotes] = useState(false);
+  const [pending, setPending] = useState<{
+    list: Ticket[];
+    target: SendTarget;
+  } | null>(null);
+  const [notes, setNotes] = useState("");
   const listRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
-  const loaded = useTickets(projectId, isOpen, showArchived);
+  const loaded = useTickets(projectId, true, showArchived);
   const tickets = loaded ?? [];
+  const kids = new Map<string, Ticket[]>();
+  for (const ticket of tickets) {
+    if (ticket.parentId === null) continue;
+    kids.set(ticket.parentId, [...(kids.get(ticket.parentId) ?? []), ticket]);
+  }
   const needle = query.trim().toLowerCase();
+  const hit = (ticket: Ticket) =>
+    ticket.title.toLowerCase().includes(needle) ||
+    ticket.description.toLowerCase().includes(needle);
+  const topLevel = tickets.filter((ticket) => ticket.parentId === null);
   const matching =
     needle === ""
-      ? tickets
-      : tickets.filter(
-          (ticket) =>
-            ticket.title.toLowerCase().includes(needle) ||
-            ticket.description.toLowerCase().includes(needle),
+      ? topLevel
+      : topLevel.filter(
+          (ticket) => hit(ticket) || (kids.get(ticket.id) ?? []).some(hit),
         );
 
   const groups = STATUSES.map((status) => ({
@@ -895,77 +1946,24 @@ function TicketsWindow() {
   const selectedTickets = ordered.filter((ticket) => selected.has(ticket.id));
   const isForm = view.kind === "form";
 
-  const toggle = useCallback(() => {
-    if (projectId === null) return;
-    setOpenProjects((current) => {
-      const next = new Set(current);
-      if (!next.delete(projectId)) next.add(projectId);
-      return next;
-    });
-  }, [projectId]);
-
-  const close = useCallback(() => {
-    if (projectId === null) return;
-    setOpenProjects((current) => {
-      const next = new Set(current);
-      next.delete(projectId);
-      return next;
-    });
-  }, [projectId]);
-
   const clearSelection = useCallback(() => {
     setSelected(new Set());
     setAnchor(null);
   }, []);
 
   useEffect(() => {
-    window.addEventListener(TOGGLE_EVENT, toggle);
-    return () => window.removeEventListener(TOGGLE_EVENT, toggle);
-  }, [toggle]);
-
-  useEffect(() => {
-    const onKeyDown = (event: KeyboardEvent) => {
-      const mod = IS_MAC
-        ? event.metaKey && !event.ctrlKey
-        : event.ctrlKey && !event.metaKey;
-      if (!mod || !event.shiftKey || event.altKey) return;
-      if (event.key.toLowerCase() !== "k") return;
-      event.preventDefault();
-      event.stopPropagation();
-      toggle();
-    };
-    window.addEventListener("keydown", onKeyDown, true);
-    return () => window.removeEventListener("keydown", onKeyDown, true);
-  }, [toggle]);
-
-  useEffect(() => {
-    setView({ kind: "list" });
-    setShowArchived(false);
-    setQuery("");
-    clearSelection();
-  }, [clearSelection, projectId]);
-
-  useEffect(() => {
     clearSelection();
   }, [clearSelection, showArchived]);
 
   useEffect(() => {
-    if (!isOpen || projectId === null) return;
     rpc.call("configGet", { projectId }).then(
-      (config) => setWorktree(config.worktree),
-      () => setWorktree(false),
+      (config) => {
+        setWorktree(config.worktree);
+        setAskNotes(config.notes);
+      },
+      () => undefined,
     );
-  }, [isOpen, projectId, rpc]);
-
-  useEffect(() => {
-    const onResize = () => {
-      setSize((current) =>
-        clampSize(current, window.innerWidth, window.innerHeight),
-      );
-    };
-    window.addEventListener("resize", onResize);
-    return () => window.removeEventListener("resize", onResize);
-  }, []);
+  }, [projectId, rpc]);
 
   const moveSelection = useCallback(
     (delta: number, extend: boolean) => {
@@ -997,7 +1995,7 @@ function TicketsWindow() {
   );
 
   useEffect(() => {
-    if (!isOpen || isForm) return;
+    if (isForm) return;
     const onKeyDown = (event: KeyboardEvent) => {
       const target = event.target as HTMLElement | null;
       const typing =
@@ -1008,6 +2006,7 @@ function TicketsWindow() {
       const mod = IS_MAC ? event.metaKey : event.ctrlKey;
 
       if (event.key === "Escape") {
+        if (target?.closest("[data-inline-edit]")) return;
         if (query !== "") {
           event.preventDefault();
           event.stopPropagation();
@@ -1018,7 +2017,20 @@ function TicketsWindow() {
           event.preventDefault();
           event.stopPropagation();
           clearSelection();
+          return;
         }
+        if (
+          pending !== null ||
+          quickAdd ||
+          menu !== null ||
+          document.querySelector('[role="menu"]') !== null
+        ) {
+          return;
+        }
+        event.preventDefault();
+        event.stopPropagation();
+        if (showArchived) setShowArchived(false);
+        else close();
         return;
       }
       if (typing) return;
@@ -1053,11 +2065,14 @@ function TicketsWindow() {
     return () => window.removeEventListener("keydown", onKeyDown, true);
   }, [
     clearSelection,
+    close,
     isForm,
-    isOpen,
+    menu,
     moveSelection,
     ordered,
+    pending,
     query,
+    quickAdd,
     selected.size,
     selectedTickets,
     showArchived,
@@ -1106,36 +2121,6 @@ function TicketsWindow() {
     setMenu({ tickets: [ticket], x, y, only });
   };
 
-  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
-    const grip = event.currentTarget;
-    const origin = { x: event.clientX, y: event.clientY, ...size };
-    grip.setPointerCapture(event.pointerId);
-    const onMove = (move: PointerEvent) => {
-      setSize(
-        clampSize(
-          {
-            width: origin.width + (origin.x - move.clientX),
-            height: origin.height + (origin.y - move.clientY),
-          },
-          window.innerWidth,
-          window.innerHeight,
-        ),
-      );
-    };
-    const stop = () => {
-      grip.removeEventListener("pointermove", onMove);
-      grip.removeEventListener("pointerup", stop);
-      grip.removeEventListener("pointercancel", stop);
-      setSize((current) => {
-        saveSize(current);
-        return current;
-      });
-    };
-    grip.addEventListener("pointermove", onMove);
-    grip.addEventListener("pointerup", stop);
-    grip.addEventListener("pointercancel", stop);
-  };
-
   const act = async (task: () => Promise<unknown>) => {
     try {
       await task();
@@ -1146,12 +2131,13 @@ function TicketsWindow() {
 
   const idsOf = (list: Ticket[]) => list.map((ticket) => ticket.id);
 
-  const send = (list: Ticket[], target: SendTarget) =>
+  const dispatch = (list: Ticket[], target: SendTarget, note: string) =>
     act(async () => {
       const { threadIds } = await rpc.call("send", {
         ids: idsOf(list),
         separate: target.kind === "new" && target.separate,
         ...(target.kind === "thread" ? { threadId: target.threadId } : {}),
+        ...(note.trim() === "" ? {} : { notes: note }),
       });
       setView({ kind: "list" });
       clearSelection();
@@ -1162,7 +2148,18 @@ function TicketsWindow() {
             ? "Sent to agent"
             : `Sent to ${threadIds.length} agents`,
       );
+      const opened = threadIds[0];
+      if (target.kind === "new" && threadIds.length === 1 && opened) {
+        navigate.toThread(opened);
+      }
     });
+
+  const send = (list: Ticket[], target: SendTarget) => {
+    if (!askNotes) return dispatch(list, target, "");
+    setNotes("");
+    setPending({ list, target });
+    return Promise.resolve();
+  };
   const setStatus = (list: Ticket[], status: Status) =>
     act(() => rpc.call("update", { ids: idsOf(list), status }));
   const archive = (list: Ticket[], archived: boolean) =>
@@ -1172,74 +2169,93 @@ function TicketsWindow() {
       clearSelection();
     });
   const remove = (list: Ticket[]) => {
-    const label =
+    const subs = list.reduce(
+      (sum, one) => sum + (kids.get(one.id)?.length ?? 0),
+      0,
+    );
+    const base =
       list.length === 1
         ? `"${list[0]?.title ?? ""}"`
         : `${list.length} tickets`;
+    const label =
+      subs === 0
+        ? base
+        : `${base} and ${list.length === 1 ? "its" : "their"} ${plural(subs, "sub-task")}`;
     if (!window.confirm(`Delete ${label}?`)) return;
+    const parentId = list.length === 1 ? (list[0]?.parentId ?? null) : null;
     void act(async () => {
       await rpc.call("remove", { ids: idsOf(list) });
-      setView({ kind: "list" });
+      setView(
+        parentId === null ? { kind: "list" } : { kind: "form", id: parentId },
+      );
       clearSelection();
     });
   };
+  const renameTicket = (ticket: Ticket, title: string) =>
+    act(() => rpc.call("update", { ids: [ticket.id], title }));
   const create = async (title: string) => {
-    if (projectId === null) return;
     await act(() => rpc.call("create", { projectId, title, description: "" }));
   };
-
-  if (!isOpen || projectId === null) return null;
 
   const editing =
     view.kind === "form"
       ? (tickets.find((ticket) => ticket.id === view.id) ?? null)
       : null;
-  const frame = clampSize(size, window.innerWidth, window.innerHeight);
+  const parent =
+    editing === null || editing.parentId === null
+      ? null
+      : (tickets.find((ticket) => ticket.id === editing.parentId) ?? null);
+  const backView: View =
+    parent === null ? { kind: "list" } : { kind: "form", id: parent.id };
 
   const rowsFor = (items: Ticket[]) =>
     items.map((ticket) => (
       <TicketRow
         key={ticket.id}
+        editing={renamingId === ticket.id}
+        onEdit={() => setRenamingId(ticket.id)}
+        onEditDone={(title) => {
+          setRenamingId(null);
+          if (title !== null) void renameTicket(ticket, title);
+        }}
         onMenu={(x, y) => openMenuFor(ticket, x, y)}
         onOpen={() => setView({ kind: "form", id: ticket.id })}
         onSelect={(event) => selectRow(ticket, event)}
         onStatusMenu={(x, y) => openMenuFor(ticket, x, y, "status")}
+        progress={progressOf(kids.get(ticket.id) ?? [])}
         selected={selected.has(ticket.id)}
+        soleSelected={selected.size === 1 && selected.has(ticket.id)}
         ticket={ticket}
       />
     ));
 
   return (
-    <div
-      className="fixed bottom-4 right-4 z-50 flex flex-col overflow-hidden rounded-xl border border-border bg-card shadow-2xl"
-      style={{ width: frame.width, height: frame.height }}
+    <Shell
+      focusKey={isForm ? (view.id ?? "new") : "list"}
+      label="Tickets"
+      onClose={close}
+      onEscape={isForm ? () => setView(backView) : close}
     >
-      <div
-        aria-hidden="true"
-        className="absolute left-0 top-0 z-20 size-4 cursor-nwse-resize"
-        onPointerDown={startResize}
-      />
-
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border pl-4 pr-1.5">
-        {isForm ? (
-          <Button
-            aria-label="Back to list"
-            className={cn(ICON_BUTTON, "-ml-2.5")}
-            onClick={() => setView({ kind: "list" })}
-            size="icon"
-            variant="ghost"
-          >
-            <Glyph icon={ArrowLeft01Icon} />
-          </Button>
-        ) : null}
+        <Button
+          aria-label={isForm ? "Back to list" : "All projects"}
+          className={cn(ICON_BUTTON, "-ml-2.5")}
+          onClick={() => (isForm ? setView(backView) : onHome())}
+          size="icon"
+          variant="ghost"
+        >
+          <Glyph icon={ArrowLeft01Icon} />
+        </Button>
         <span className="flex-1 truncate text-xs font-semibold tracking-tight">
           {isForm
             ? view.id === null
               ? "New ticket"
-              : "Ticket"
+              : parent === null
+                ? "Ticket"
+                : "Sub-task"
             : showArchived
               ? "Archived"
-              : "Tickets"}
+              : title}
         </span>
         {isForm ? null : (
           <>
@@ -1265,6 +2281,21 @@ function TicketsWindow() {
                 side="bottom"
                 sideOffset={6}
               >
+                {projectId === routeProjectId ? null : (
+                  <>
+                    <DropdownMenu.Item
+                      className={MENU_ITEM}
+                      onSelect={() => {
+                        close();
+                        navigate.toProject(projectId);
+                      }}
+                    >
+                      <Glyph icon={FolderIcon} />
+                      <span className="flex-1">Open project</span>
+                    </DropdownMenu.Item>
+                    <DropdownMenu.Separator className="my-1 h-px bg-border" />
+                  </>
+                )}
                 <DropdownMenu.Item
                   className={MENU_ITEM}
                   onSelect={() => setShowArchived((current) => !current)}
@@ -1288,6 +2319,25 @@ function TicketsWindow() {
                   <Glyph icon={FolderIcon} />
                   <span className="flex-1">Isolated worktree</span>
                   {worktree ? (
+                    <Glyph
+                      icon={Tick02Icon}
+                      className="size-3 text-muted-foreground"
+                    />
+                  ) : null}
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className={MENU_ITEM}
+                  onSelect={() => {
+                    const next = !askNotes;
+                    setAskNotes(next);
+                    rpc
+                      .call("configSet", { projectId, notes: next })
+                      .catch(() => setAskNotes(!next));
+                  }}
+                >
+                  <Glyph icon={Edit02Icon} />
+                  <span className="flex-1">Ask for notes before sending</span>
+                  {askNotes ? (
                     <Glyph
                       icon={Tick02Icon}
                       className="size-3 text-muted-foreground"
@@ -1353,12 +2403,15 @@ function TicketsWindow() {
         <TicketForm
           key={view.id ?? "new"}
           onArchive={(ticket) => void archive([ticket], !ticket.archived)}
-          onBack={() => setView({ kind: "list" })}
+          onBack={() => setView(backView)}
           onDelete={(ticket) => remove([ticket])}
+          onOpenTicket={(id) => setView({ kind: "form", id })}
           onSend={(ticket) =>
             void send([ticket], { kind: "new", separate: false })
           }
+          parent={parent}
           projectId={projectId}
+          subtasks={editing === null ? [] : (kids.get(editing.id) ?? [])}
           ticket={editing}
         />
       ) : (
@@ -1415,16 +2468,329 @@ function TicketsWindow() {
         />
       )}
 
+      {pending === null ? null : (
+        <NotesPrompt
+          notes={notes}
+          onCancel={() => setPending(null)}
+          onChange={setNotes}
+          onConfirm={() => {
+            const job = pending;
+            setPending(null);
+            void dispatch(job.list, job.target, notes);
+          }}
+          tickets={pending.list}
+        />
+      )}
+
       <TicketMenu
         menu={menu}
         onArchive={(list, archived) => void archive(list, archived)}
         onClose={() => setMenu(null)}
         onDelete={remove}
+        onOpen={(ticket) => setView({ kind: "form", id: ticket.id })}
+        onRename={(ticket) => setRenamingId(ticket.id)}
         onSend={(list, target) => void send(list, target)}
         onStatus={(list, status) => void setStatus(list, status)}
         threadId={routeThreadId}
       />
+    </Shell>
+  );
+}
+
+const STATS_DAYS = 14;
+
+type ProjectRow = {
+  id: string;
+  name: string;
+  todo: number;
+  in_progress: number;
+  done: number;
+  lastAt: number | null;
+};
+type SortKey = "recent" | "name" | "open";
+
+function useLive<T>(load: () => Promise<T>): T | null {
+  const connection = useRealtimeConnectionState();
+  const [value, setValue] = useState<T | null>(null);
+  const loadRef = useRef(load);
+  loadRef.current = load;
+
+  const refresh = useCallback(async () => {
+    try {
+      setValue(await loadRef.current());
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Could not load");
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+  useEffect(() => {
+    if (connection === "connected") void refresh();
+  }, [connection, refresh]);
+  useRealtime(TICKETS_CHANGED, () => void refresh());
+
+  return value;
+}
+
+function useProjects(): ProjectRow[] | null {
+  const rpc = useRpc<typeof rpcContract>();
+  const result = useLive(() => rpc.call("projects", {}));
+  return result === null ? null : result.projects;
+}
+
+function StatCard({ value, label }: { value: number; label: string }) {
+  return (
+    <div className="flex-1 rounded-lg border border-border bg-card px-3 py-2.5">
+      <div className="text-xl font-semibold tabular-nums tracking-tight">
+        {value}
+      </div>
+      <div className="text-[11px] text-muted-foreground">{label}</div>
     </div>
+  );
+}
+
+function ActivityBars({ done, now }: { done: DoneItem[]; now: number }) {
+  const days = perDay(done, STATS_DAYS, now);
+  const peak = Math.max(1, ...days.map((day) => day.count));
+  const summary = `Done per day over the last ${STATS_DAYS} days. ${days
+    .map((day) => `${longDate(day.at)}: ${day.count}`)
+    .join(". ")}.`;
+  return (
+    <div>
+      <div
+        aria-label={summary}
+        className="flex h-14 items-end gap-1"
+        role="img"
+      >
+        {days.map((day) => (
+          <div
+            className="flex h-full flex-1 items-end"
+            key={day.key}
+            title={`${longDate(day.at)}: ${day.count} done`}
+          >
+            <div
+              className={cn(
+                "w-full rounded-sm",
+                day.count === 0 ? "bg-muted" : "bg-emerald-500",
+              )}
+              style={{
+                height: day.count === 0 ? "2px" : `${(day.count / peak) * 100}%`,
+              }}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mt-1 flex justify-between text-[10px] text-muted-foreground/70">
+        <span>{shortDate(days[0]?.at ?? now)}</span>
+        <span>Today</span>
+      </div>
+    </div>
+  );
+}
+
+function StatsPanel({ projects }: { projects: ProjectRow[] | null }) {
+  const rpc = useRpc<typeof rpcContract>();
+  const stats = useLive(() => rpc.call("stats", { days: STATS_DAYS }));
+  const now = Date.now();
+
+  if (stats === null) {
+    return <div className="h-32 animate-pulse rounded-lg bg-muted/50" />;
+  }
+
+  const done = stats.done;
+  const names = new Map((projects ?? []).map((one) => [one.id, one.name]));
+  const active = new Set(done.map((item) => item.projectId)).size;
+  const startsLate = stats.tracking === null || stats.tracking > stats.since;
+
+  const download = () => {
+    const markdown = summaryMarkdown({ done, days: STATS_DAYS, now, names });
+    const url = URL.createObjectURL(
+      new Blob([markdown], { type: "text/markdown;charset=utf-8" }),
+    );
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `tickets-summary-${new Date(now).toISOString().slice(0, 10)}.md`;
+    link.click();
+    URL.revokeObjectURL(url);
+    toast.success("Summary downloaded");
+  };
+
+  return (
+    <section aria-labelledby="stats-heading" className="space-y-3">
+      <div className="flex items-center gap-2">
+        <h2
+          className="flex-1 text-xs font-semibold tracking-tight"
+          id="stats-heading"
+        >
+          Last {STATS_DAYS} days
+        </h2>
+        <Button
+          className="h-7 rounded-md px-2 text-[11px]"
+          disabled={done.length === 0}
+          onClick={download}
+          size="sm"
+          variant="secondary"
+        >
+          <Glyph icon={Download01Icon} className="size-3" />
+          Export last {STATS_DAYS} days
+        </Button>
+      </div>
+      <div className="flex gap-2">
+        <StatCard label="Done" value={done.length} />
+        <StatCard label="In progress now" value={stats.working} />
+        <StatCard label="Projects with progress" value={active} />
+      </div>
+      {done.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          Nothing finished in the last {STATS_DAYS} days. Completed tickets show
+          up here.
+        </p>
+      ) : (
+        <ActivityBars done={done} now={now} />
+      )}
+      {startsLate ? (
+        <p className="text-[11px] text-muted-foreground/70">
+          {stats.tracking === null
+            ? "Finish a ticket and it will be counted here."
+            : `Stats start on ${shortDate(stats.tracking)}. Earlier tickets have no finish date.`}
+        </p>
+      ) : null}
+    </section>
+  );
+}
+
+function ProjectButton({
+  project,
+  now,
+  onOpen,
+}: {
+  project: ProjectRow;
+  now: number;
+  onOpen: () => void;
+}) {
+  const counts: [Status, number][] = [
+    ["todo", project.todo],
+    ["in_progress", project.in_progress],
+    ["done", project.done],
+  ];
+  return (
+    <button
+      className="flex w-full items-center gap-3 rounded-lg px-3 py-2 text-left outline-none transition-colors hover:bg-state-hover focus-visible:ring-2 focus-visible:ring-ring"
+      onClick={onOpen}
+      type="button"
+    >
+      <Glyph icon={FolderIcon} className="size-4 text-muted-foreground" />
+      <span className="min-w-0 flex-1 truncate text-sm">{project.name}</span>
+      <span className="flex shrink-0 items-center gap-3 text-[11px] tabular-nums text-muted-foreground">
+        {counts.map(([status, count]) => (
+          <span className="flex items-center gap-1" key={status}>
+            <Glyph icon={STATUS_ICON[status]} className={STATUS_TONE[status]} />
+            {count}
+            <span className="sr-only"> {STATUS_LABEL[status]}</span>
+          </span>
+        ))}
+      </span>
+      <span className="w-16 shrink-0 text-right text-[11px] text-muted-foreground/70">
+        {project.lastAt === null ? "No tickets" : ago(project.lastAt, now)}
+      </span>
+    </button>
+  );
+}
+
+function ProjectList({
+  projects,
+  onOpen,
+}: {
+  projects: ProjectRow[] | null;
+  onOpen: (id: string) => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [sort, setSort] = useState<SortKey>("recent");
+  const listRef = useRef<HTMLUListElement>(null);
+  const now = Date.now();
+
+  if (projects === null) return <SkeletonList />;
+  if (projects.length === 0) {
+    return (
+      <p className="py-6 text-center text-xs text-muted-foreground">
+        No projects yet. Open a project to start tracking tickets.
+      </p>
+    );
+  }
+
+  const needle = query.trim().toLowerCase();
+  const shown = projects
+    .filter((one) => one.name.toLowerCase().includes(needle))
+    .sort((a, b) => {
+      if (sort === "name") return a.name.localeCompare(b.name);
+      if (sort === "open") {
+        return b.todo + b.in_progress - (a.todo + a.in_progress) ||
+          a.name.localeCompare(b.name);
+      }
+      return (b.lastAt ?? 0) - (a.lastAt ?? 0) || a.name.localeCompare(b.name);
+    });
+
+  const move = (event: React.KeyboardEvent) => {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    const buttons = Array.from(
+      listRef.current?.querySelectorAll<HTMLButtonElement>("button") ?? [],
+    );
+    const at = buttons.indexOf(document.activeElement as HTMLButtonElement);
+    if (at === -1) return;
+    event.preventDefault();
+    buttons[at + (event.key === "ArrowDown" ? 1 : -1)]?.focus();
+  };
+
+  return (
+    <section aria-labelledby="projects-heading" className="space-y-2">
+      <div className="flex items-center gap-2">
+        <h2
+          className="flex-1 text-xs font-semibold tracking-tight"
+          id="projects-heading"
+        >
+          Projects
+        </h2>
+        <label className="flex h-7 items-center gap-1.5 rounded-md border border-border px-2 focus-within:ring-2 focus-within:ring-ring">
+          <Glyph icon={Search01Icon} className="size-3 text-muted-foreground/60" />
+          <input
+            aria-label="Search projects"
+            className="w-40 bg-transparent text-xs outline-none placeholder:text-muted-foreground/50"
+            onChange={(event) => setQuery(event.currentTarget.value)}
+            placeholder="Search projects…"
+            value={query}
+          />
+        </label>
+        <select
+          aria-label="Sort projects"
+          className="h-7 rounded-md border border-border bg-transparent px-1.5 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          onChange={(event) => setSort(event.currentTarget.value as SortKey)}
+          value={sort}
+        >
+          <option value="recent">Recent</option>
+          <option value="name">A to Z</option>
+          <option value="open">Most open</option>
+        </select>
+      </div>
+      {shown.length === 0 ? (
+        <p className="py-6 text-center text-xs text-muted-foreground">
+          No project matches “{query.trim()}”.
+        </p>
+      ) : (
+        <ul onKeyDown={move} ref={listRef}>
+          {shown.map((project) => (
+            <li key={project.id}>
+              <ProjectButton
+                now={now}
+                onOpen={() => onOpen(project.id)}
+                project={project}
+              />
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
   );
 }
 
@@ -1509,11 +2875,10 @@ export default definePluginApp((app) => {
     title: "Tickets",
     component: ThreadHeaderTicketsAction,
   });
-  app.slots.commandPaletteAction({
+  app.commands.register({
     id: "toggle-tickets",
-    title: "Hmm Tickets: toggle tickets",
-    isAvailable: ({ projectId }) =>
-      projectId !== null || composeProjectId !== null,
+    title: "Toggle tickets",
+    defaultShortcut: { key: "k", mod: true, shift: true },
     run: toggleTickets,
   });
   app.composer.customize({
