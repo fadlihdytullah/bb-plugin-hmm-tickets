@@ -15,7 +15,7 @@ Requires BB 0.42 or newer.
 ## Open it
 
 - `Cmd+Shift+K` (`Ctrl+Shift+K` on Windows and Linux) toggles the window.
-- The checklist glyph in the thread header.
+- The checklist glyph in the composer.
 - **Hmm Tickets: toggle tickets** in the command palette (`Cmd+Shift+P`).
 
 The window opens on the board of the project you are in. On a projectless

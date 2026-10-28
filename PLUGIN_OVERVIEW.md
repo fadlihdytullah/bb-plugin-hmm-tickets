@@ -3,7 +3,7 @@ grouped by status, with every ticket one right-click away from an agent.
 
 ## What you get
 
-- A dialog, opened with `Cmd+Shift+K`, from the thread header,
+- A dialog, opened with `Cmd+Shift+K`, from the composer,
   or from the command palette. It opens on the project you are in, or on the
   project list when there is none.
 - A flat list grouped into **To Do**, **In Progress**, and **Done**. Groups

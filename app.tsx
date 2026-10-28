@@ -18,7 +18,6 @@ import {
   useRealtime,
   useRealtimeConnectionState,
   useRpc,
-  type PluginThreadHeaderActionProps,
 } from "@get-bb/plugin-sdk/app";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import { HugeiconsIcon, type IconSvgElement } from "@hugeicons/react";
@@ -74,7 +73,6 @@ import { cn } from "@/lib/utils";
 const TOGGLE_EVENT = "hmm-tickets:toggle";
 const TICKETS_CHANGED = "tickets-changed";
 const IS_MAC = /Mac|iPhone|iPad/.test(navigator.platform);
-const MOD_LABEL = IS_MAC ? "⌘" : "Ctrl+";
 
 let composeProjectId: string | null = null;
 const composeListeners = new Set<() => void>();
@@ -3443,25 +3441,6 @@ function toggleTickets(): void {
   window.dispatchEvent(new Event(TOGGLE_EVENT));
 }
 
-function TicketsActionButton({ className = "size-7" }: { className?: string }) {
-  return (
-    <Button
-      aria-keyshortcuts="Meta+Shift+K Control+Shift+K"
-      aria-label={`Tickets (${MOD_LABEL}⇧K)`}
-      className={cn("text-muted-foreground hover:text-foreground", className)}
-      onClick={toggleTickets}
-      size="icon"
-      variant="ghost"
-    >
-      <Glyph icon={CheckListIcon} className="size-4" />
-    </Button>
-  );
-}
-
-function ThreadHeaderTicketsAction(_props: PluginThreadHeaderActionProps) {
-  return <TicketsActionButton />;
-}
-
 function ComposerTicketAction() {
   const view = useComposerView();
   const composer = useComposer();
@@ -3514,11 +3493,6 @@ export default definePluginApp((app) => {
   app.slots.experimental_appOverlay({
     id: "tickets",
     component: TicketsWindow,
-  });
-  app.slots.experimental_threadHeaderAction({
-    id: "tickets",
-    title: "Tickets",
-    component: ThreadHeaderTicketsAction,
   });
   app.commands.register({
     id: "toggle-tickets",
