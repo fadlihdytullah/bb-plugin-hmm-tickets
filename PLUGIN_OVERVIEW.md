@@ -22,6 +22,9 @@ grouped by status, with every ticket one right-click away from an agent.
   batch, one thread per ticket, or straight into the thread you are reading.
   The ticket moves to In Progress, shows a spinner while the agent works, and
   its badge opens that thread.
+- A **Queue** across all projects: mark To Do and In Progress tickets, reorder
+  them, and keep one **Now** with the rest **Next**. It leaves the queue when
+  the ticket is done.
 - The back arrow opens **All projects** inside the dialog: every project with
   its counts, plus a 14-day panel of what got done with a Markdown export.
   Picking a project opens its board; the dialog still opens on the project

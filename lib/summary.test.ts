@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { isStale, type Ticket } from "./status.ts";
 import { ago, perDay, summaryMarkdown } from "./summary.ts";
 
 const now = new Date(2026, 9, 27, 12).getTime();
@@ -29,4 +30,13 @@ test("summaryMarkdown lists counts, projects and items", () => {
 test("ago", () => {
   assert.equal(ago(now - 2 * 3_600_000, now), "2h ago");
   assert.equal(ago(now - 3 * 86_400_000, now), "3d ago");
+});
+
+test("isStale hides Done older than 14 days, falls back to createdAt", () => {
+  const base = { status: "done", createdAt: 0, doneAt: null } as Ticket;
+  const day = 86_400_000;
+  assert.equal(isStale({ ...base, doneAt: now - 3 * day }, now), false);
+  assert.equal(isStale({ ...base, doneAt: now - 20 * day }, now), true);
+  assert.equal(isStale({ ...base, createdAt: now - 20 * day }, now), true);
+  assert.equal(isStale({ ...base, status: "todo", createdAt: 0 }, now), false);
 });

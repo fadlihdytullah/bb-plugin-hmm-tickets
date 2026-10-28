@@ -23,10 +23,22 @@ export const ticketSchema = z
     archived: z.boolean(),
     threadId: z.string().nullable(),
     working: z.boolean(),
+    createdAt: z.number(),
+    doneAt: z.number().nullable(),
+    queuePos: z.number().nullable(),
   })
   .strict();
 
 export type Ticket = z.infer<typeof ticketSchema>;
+
+export const RECENT_DAYS = 14;
+
+export function isStale(ticket: Ticket, now: number): boolean {
+  return (
+    ticket.status === "done" &&
+    (ticket.doneAt ?? ticket.createdAt) < now - RECENT_DAYS * 86_400_000
+  );
+}
 
 export function splitDraft(text: string): { title: string; description: string } {
   const trimmed = text.trim();

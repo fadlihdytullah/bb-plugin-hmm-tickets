@@ -21,10 +21,24 @@ Requires BB 0.42 or newer.
 The window opens on the board of the project you are in. On a projectless
 screen it opens the project list instead.
 
+## Queue
+
+Mark To Do and In Progress tickets from any project as queued, then work through
+them in order: the first is **Now**, the rest are **Next**.
+
+- **Add to queue** from the ticket menu, or press `Q` on the selection. **Work on
+  this next** puts one at the top.
+- The **Queue** button in the board header, or the **Queue** tab on the home
+  screen, shows the list. **Send to agent** on Now starts it.
+- Click an item to open its ticket. Right-click it, or use its `...` menu, for
+  Open, Work on this next, Move up, Move down and Remove from queue.
+- `Alt+Up` / `Alt+Down` reorder the focused item and `Q` removes it.
+- A ticket leaves the queue when it is done, archived or deleted.
+
 ## All projects
 
-The back arrow in the list header opens the project list inside the same
-window. Pick one to open its board.
+The back arrow in the list header opens the overview inside the same window.
+Pick a project to open its board.
 
 - Every project with its To Do, In Progress and Done counts, searchable and
   sortable. **Open project** in the `...` menu jumps to the project.
@@ -36,7 +50,9 @@ window. Pick one to open its board.
 
 ## The list
 
-Tickets are grouped into **To Do**, **In Progress**, and **Done**. Click a
+Tickets are grouped into **To Do**, **In Progress**, and **Done**. Done starts
+collapsed and only shows tickets finished in the last two weeks; **All tickets** in
+the `...` menu shows older ones too. Click a
 group heading to collapse it. The search field above the list filters on title
 and description; `/` focuses it.
 
@@ -137,7 +153,7 @@ bb plugin reload hmm-tickets
 
 `bb plugin dev` watches the sources and reloads on every change.
 
-`node --experimental-strip-types --test lib/summary.test.ts` checks the summary
+`node --experimental-strip-types --test lib/*.test.ts` checks the pure
 helpers.
 
 ## License

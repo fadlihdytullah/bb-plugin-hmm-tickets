@@ -2,6 +2,7 @@ import {
   useCallback,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
   useSyncExternalStore,
@@ -27,6 +28,8 @@ import {
   ArrowDown01Icon,
   ArrowLeft01Icon,
   ArrowRight01Icon,
+  ArrowUp01Icon,
+  ArrowUpDoubleIcon,
   BotIcon,
   Cancel01Icon,
   CheckListIcon,
@@ -40,6 +43,7 @@ import {
   FolderIcon,
   Loading03Icon,
   MoreHorizontalIcon,
+  PlayListIcon,
   Search01Icon,
   SentIcon,
   Tick02Icon,
@@ -48,6 +52,7 @@ import { toast } from "sonner";
 import type { rpcContract } from "./server";
 import { Button } from "@/components/ui/button";
 import {
+  isStale,
   plural,
   progressOf,
   splitDraft,
@@ -367,6 +372,12 @@ function TicketRow({
           </span>
         </span>
       )}
+      {ticket.queuePos === null ? null : (
+        <span className="shrink-0 rounded-full bg-accent px-1.5 text-[10px] tabular-nums text-muted-foreground">
+          <span aria-hidden="true">#{ticket.queuePos + 1}</span>
+          <span className="sr-only">Queue position {ticket.queuePos + 1}</span>
+        </span>
+      )}
       <ThreadBadge ticket={ticket} />
       <button
         aria-label="Ticket actions"
@@ -486,6 +497,10 @@ function SkeletonList() {
   );
 }
 
+function queueable(ticket: Ticket): boolean {
+  return ticket.parentId === null && ticket.status !== "done" && !ticket.archived;
+}
+
 function TicketMenu({
   menu,
   threadId,
@@ -493,6 +508,8 @@ function TicketMenu({
   onOpen,
   onRename,
   onSend,
+  onQueue,
+  onQueueNext,
   onStatus,
   onArchive,
   onDelete,
@@ -503,11 +520,17 @@ function TicketMenu({
   onOpen: (ticket: Ticket) => void;
   onRename: (ticket: Ticket) => void;
   onSend: (tickets: Ticket[], target: SendTarget) => void;
+  onQueue: (tickets: Ticket[], queued: boolean) => void;
+  onQueueNext: (ticket: Ticket) => void;
   onStatus: (tickets: Ticket[], status: Status) => void;
   onArchive: (tickets: Ticket[], archived: boolean) => void;
   onDelete: (tickets: Ticket[]) => void;
 }) {
   const tickets = menu?.tickets ?? [];
+  const queueables = tickets.filter(queueable);
+  const inQueue =
+    queueables.length > 0 &&
+    queueables.every((ticket) => ticket.queuePos !== null);
   const count = tickets.length;
   const many = count > 1;
   const suffix = many ? ` ${count} tickets` : "";
@@ -617,6 +640,26 @@ function TicketMenu({
                     <Glyph icon={SentIcon} />
                     Send to this thread
                   </DropdownMenu.Item>
+                )}
+                {queueables.length === 0 ? null : (
+                  <>
+                    <DropdownMenu.Item
+                      className={MENU_ITEM}
+                      onSelect={() => onQueue(queueables, !inQueue)}
+                    >
+                      <Glyph icon={inQueue ? Cancel01Icon : Add01Icon} />
+                      {inQueue ? "Remove from queue" : "Add to queue"}
+                    </DropdownMenu.Item>
+                    {single === undefined || single.queuePos === 0 ? null : (
+                      <DropdownMenu.Item
+                        className={MENU_ITEM}
+                        onSelect={() => onQueueNext(single)}
+                      >
+                        <Glyph icon={ArrowUpDoubleIcon} />
+                        Work on this next
+                      </DropdownMenu.Item>
+                    )}
+                  </>
                 )}
                 <DropdownMenu.Separator className="my-1 h-px bg-border" />
                 <DropdownMenu.Label className="px-2 pb-1 pt-0.5 text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70">
@@ -1780,17 +1823,22 @@ function TicketsWindow() {
   const [open, setOpen] = useState(false);
   const [home, setHome] = useState(false);
   const [picked, setPicked] = useState<string | null>(null);
+  const [pickedTicket, setPickedTicket] = useState<string | null>(null);
+  const [tab, setTab] = useState<HomeTab | null>(null);
 
   useEffect(() => {
     if (resolvedProjectId === null) return;
     setLastProjectId(resolvedProjectId);
     setPicked(null);
+    setPickedTicket(null);
     setHome(false);
   }, [resolvedProjectId]);
 
   const toggle = useCallback(() => {
     setOpen((current) => !current);
     setPicked(null);
+    setPickedTicket(null);
+    setTab(null);
     setHome(projectId === null);
   }, [projectId]);
 
@@ -1806,12 +1854,20 @@ function TicketsWindow() {
     <TicketsContent
       home={home || (picked ?? projectId) === null}
       onClose={close}
-      onHome={() => setHome(true)}
-      onPick={(id) => {
+      onHome={(next) => {
+        setTab(next ?? null);
+        setPickedTicket(null);
+        setHome(true);
+      }}
+      onPick={(id, ticketId) => {
         setPicked(id);
+        setPickedTicket(ticketId ?? null);
         setHome(false);
       }}
+      onTab={setTab}
       projectId={picked ?? projectId}
+      tab={tab}
+      ticketId={pickedTicket}
     />
   );
 }
@@ -1819,23 +1875,36 @@ function TicketsWindow() {
 function TicketsContent({
   home,
   projectId,
+  tab,
   onClose,
   onHome,
   onPick,
+  onTab,
+  ticketId,
 }: {
   home: boolean;
   projectId: string | null;
+  tab: HomeTab | null;
+  ticketId: string | null;
   onClose: () => void;
-  onHome: () => void;
-  onPick: (id: string) => void;
+  onHome: (tab?: HomeTab) => void;
+  onPick: (id: string, ticketId?: string) => void;
+  onTab: (tab: HomeTab) => void;
 }) {
   const projects = useProjects();
+  const queue = useQueue();
   if (home || projectId === null) {
+    const current: HomeTab | null =
+      tab ?? (queue === null ? null : queue.length > 0 ? "queue" : "overview");
+    const tabs: { id: HomeTab; label: string }[] = [
+      { id: "queue", label: "Queue" },
+      { id: "overview", label: "Overview" },
+    ];
     return (
       <Dialog focusKey="home" label="Tickets" onClose={onClose} onEscape={onClose}>
         <div className="flex h-10 shrink-0 items-center gap-1 border-b border-border pl-4 pr-1.5">
           <span className="flex-1 truncate text-xs font-semibold tracking-tight">
-            All projects
+            Tickets
           </span>
           <Button
             aria-label="Close tickets"
@@ -1847,9 +1916,65 @@ function TicketsContent({
             <Glyph icon={Cancel01Icon} />
           </Button>
         </div>
-        <div className={cn("min-h-0 flex-1 space-y-6 overflow-y-auto p-4", SCROLLBAR)}>
-          <StatsPanel projects={projects} />
-          <ProjectList onOpen={onPick} projects={projects} />
+        <div
+          aria-label="Tickets home"
+          className="flex h-9 shrink-0 items-center gap-1 border-b border-border px-3"
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const other = current === "queue" ? "overview" : "queue";
+            onTab(other);
+            document.getElementById(`home-tab-${other}`)?.focus();
+          }}
+          role="tablist"
+        >
+          {tabs.map((item) => (
+            <button
+              aria-controls="home-panel"
+              aria-selected={current === item.id}
+              className={cn(
+                "flex h-6 items-center gap-1.5 rounded-md px-2 text-xs outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none",
+                current === item.id
+                  ? "bg-accent font-medium text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+              id={`home-tab-${item.id}`}
+              key={item.id}
+              onClick={() => onTab(item.id)}
+              role="tab"
+              tabIndex={current === item.id ? 0 : -1}
+              type="button"
+            >
+              {item.label}
+              {item.id === "queue" && queue !== null && queue.length > 0 ? (
+                <span className="text-[10px] tabular-nums text-muted-foreground">
+                  {queue.length}
+                </span>
+              ) : null}
+            </button>
+          ))}
+        </div>
+        <div
+          aria-labelledby={current === null ? undefined : `home-tab-${current}`}
+          className={cn("min-h-0 flex-1 overflow-y-auto p-4", SCROLLBAR)}
+          id="home-panel"
+          role="tabpanel"
+        >
+          {current === null ? (
+            <SkeletonList />
+          ) : current === "queue" ? (
+            <QueueView
+              onClose={onClose}
+              onOpenTicket={(ticket) => onPick(ticket.projectId, ticket.id)}
+              projects={projects}
+              tickets={queue ?? []}
+            />
+          ) : (
+            <div className="space-y-6">
+              <StatsPanel projects={projects} />
+              <ProjectList onOpen={(id) => onPick(id)} projects={projects} />
+            </div>
+          )}
         </div>
       </Dialog>
     );
@@ -1857,9 +1982,11 @@ function TicketsContent({
   return (
     <TicketsBoard
       key={projectId}
+      initialTicketId={ticketId}
       onClose={onClose}
       onHome={onHome}
       projectId={projectId}
+      queueCount={queue?.length ?? 0}
       title={projects?.find((one) => one.id === projectId)?.name ?? "Tickets"}
     />
   );
@@ -1875,13 +2002,17 @@ type ShellProps = {
 
 function TicketsBoard({
   projectId,
+  initialTicketId = null,
   onClose,
   onHome,
+  queueCount,
   title,
 }: {
   projectId: string;
+  initialTicketId?: string | null;
   onClose: () => void;
-  onHome: () => void;
+  onHome: (tab?: HomeTab) => void;
+  queueCount: number;
   title: string;
 }) {
   const rpc = useRpc<typeof rpcContract>();
@@ -1892,14 +2023,19 @@ function TicketsBoard({
   const Shell = Dialog;
   const close = onClose;
   const [showArchived, setShowArchived] = useState(false);
-  const [view, setView] = useState<View>({ kind: "list" });
+  const [showAll, setShowAll] = useState(false);
+  const [view, setView] = useState<View>(
+    initialTicketId === null
+      ? { kind: "list" }
+      : { kind: "form", id: initialTicketId },
+  );
   const [menu, setMenu] = useState<Menu | null>(null);
   const [selected, setSelected] = useState<ReadonlySet<string>>(
     () => new Set(),
   );
   const [anchor, setAnchor] = useState<string | null>(null);
   const [collapsed, setCollapsed] = useState<ReadonlySet<Status>>(
-    () => new Set(),
+    () => new Set<Status>(["done"]),
   );
   const [query, setQuery] = useState("");
   const [quickAdd, setQuickAdd] = useState(false);
@@ -1916,6 +2052,16 @@ function TicketsBoard({
 
   const loaded = useTickets(projectId, true, showArchived);
   const tickets = loaded ?? [];
+  useEffect(() => {
+    if (
+      loaded !== null &&
+      view.kind === "form" &&
+      view.id !== null &&
+      !loaded.some((ticket) => ticket.id === view.id)
+    ) {
+      setView({ kind: "list" });
+    }
+  }, [loaded, view]);
   const kids = new Map<string, Ticket[]>();
   for (const ticket of tickets) {
     if (ticket.parentId === null) continue;
@@ -1925,7 +2071,12 @@ function TicketsBoard({
   const hit = (ticket: Ticket) =>
     ticket.title.toLowerCase().includes(needle) ||
     ticket.description.toLowerCase().includes(needle);
-  const topLevel = tickets.filter((ticket) => ticket.parentId === null);
+  const now = Date.now();
+  const topLevel = tickets.filter(
+    (ticket) =>
+      ticket.parentId === null &&
+      (showAll || showArchived || !isStale(ticket, now)),
+  );
   const matching =
     needle === ""
       ? topLevel
@@ -2030,6 +2181,7 @@ function TicketsBoard({
         event.preventDefault();
         event.stopPropagation();
         if (showArchived) setShowArchived(false);
+        else if (showAll) setShowAll(false);
         else close();
         return;
       }
@@ -2054,6 +2206,16 @@ function TicketsBoard({
       if (event.key === "/") {
         event.preventDefault();
         searchRef.current?.focus();
+        return;
+      }
+      if (event.key.toLowerCase() === "q" && !mod) {
+        const list = selectedTickets.filter(queueable);
+        if (list.length === 0) return;
+        event.preventDefault();
+        void queueTickets(
+          list,
+          !list.every((ticket) => ticket.queuePos !== null),
+        );
         return;
       }
       if (event.key.toLowerCase() === "n" && !mod && !showArchived) {
@@ -2160,6 +2322,30 @@ function TicketsBoard({
     setPending({ list, target });
     return Promise.resolve();
   };
+  const queueTickets = (list: Ticket[], queued: boolean) =>
+    act(async () => {
+      const ids = idsOf(list);
+      await rpc.call("queueSet", { ids, queued });
+      if (queued) {
+        toast.success("Added to queue");
+        return;
+      }
+      toast("Removed from queue", {
+        action: {
+          label: "Undo",
+          onClick: () =>
+            void rpc
+              .call("queueSet", { ids, queued: true })
+              .catch(() => undefined),
+        },
+      });
+    });
+  const queueNext = (ticket: Ticket) =>
+    act(async () => {
+      await rpc.call("queueSet", { ids: [ticket.id], queued: true });
+      await rpc.call("queueMove", { id: ticket.id, to: "top" });
+      toast.success("Next in queue");
+    });
   const setStatus = (list: Ticket[], status: Status) =>
     act(() => rpc.call("update", { ids: idsOf(list), status }));
   const archive = (list: Ticket[], archived: boolean) =>
@@ -2240,7 +2426,7 @@ function TicketsBoard({
         <Button
           aria-label={isForm ? "Back to list" : "All projects"}
           className={cn(ICON_BUTTON, "-ml-2.5")}
-          onClick={() => (isForm ? setView(backView) : onHome())}
+          onClick={() => (isForm ? setView(backView) : onHome("overview"))}
           size="icon"
           variant="ghost"
         >
@@ -2255,7 +2441,9 @@ function TicketsBoard({
                 : "Sub-task"
             : showArchived
               ? "Archived"
-              : title}
+              : showAll
+                ? "All tickets"
+                : title}
         </span>
         {isForm ? null : (
           <>
@@ -2264,6 +2452,19 @@ function TicketsBoard({
                 {matching.length}
               </span>
             )}
+            <Button
+              aria-label={`Queue, ${plural(queueCount, "ticket")}`}
+              className="h-6 shrink-0 gap-1 rounded-md px-1.5 text-[11px] text-muted-foreground hover:text-foreground"
+              onClick={() => onHome("queue")}
+              size="sm"
+              variant="ghost"
+            >
+              <Glyph icon={PlayListIcon} className="size-3" />
+              Queue
+              {queueCount > 0 ? (
+                <span className="tabular-nums">{queueCount}</span>
+              ) : null}
+            </Button>
             <DropdownMenu.Root modal={false}>
               <DropdownMenu.Trigger asChild>
                 <Button
@@ -2298,7 +2499,22 @@ function TicketsBoard({
                 )}
                 <DropdownMenu.Item
                   className={MENU_ITEM}
-                  onSelect={() => setShowArchived((current) => !current)}
+                  onSelect={() => {
+                    setShowArchived(false);
+                    setShowAll((current) => !current);
+                  }}
+                >
+                  <Glyph icon={CheckListIcon} />
+                  <span className="flex-1">
+                    {showAll && !showArchived ? "Last 2 weeks" : "All tickets"}
+                  </span>
+                </DropdownMenu.Item>
+                <DropdownMenu.Item
+                  className={MENU_ITEM}
+                  onSelect={() => {
+                    setShowAll(false);
+                    setShowArchived((current) => !current);
+                  }}
                 >
                   <Glyph icon={Archive03Icon} />
                   <span className="flex-1">
@@ -2399,7 +2615,9 @@ function TicketsBoard({
         </div>
       )}
 
-      {isForm ? (
+      {isForm && view.id !== null && loaded === null ? (
+        <SkeletonList />
+      ) : isForm ? (
         <TicketForm
           key={view.id ?? "new"}
           onArchive={(ticket) => void archive([ticket], !ticket.archived)}
@@ -2488,6 +2706,8 @@ function TicketsBoard({
         onClose={() => setMenu(null)}
         onDelete={remove}
         onOpen={(ticket) => setView({ kind: "form", id: ticket.id })}
+        onQueue={(list, queued) => void queueTickets(list, queued)}
+        onQueueNext={(ticket) => void queueNext(ticket)}
         onRename={(ticket) => setRenamingId(ticket.id)}
         onSend={(list, target) => void send(list, target)}
         onStatus={(list, status) => void setStatus(list, status)}
@@ -2508,6 +2728,10 @@ type ProjectRow = {
   lastAt: number | null;
 };
 type SortKey = "recent" | "name" | "open";
+type HomeTab = "queue" | "overview";
+
+const EASE_OUT = "cubic-bezier(0.23, 1, 0.32, 1)";
+const EASE_IN_OUT = "cubic-bezier(0.77, 0, 0.175, 1)";
 
 function useLive<T>(load: () => Promise<T>): T | null {
   const connection = useRealtimeConnectionState();
@@ -2532,6 +2756,12 @@ function useLive<T>(load: () => Promise<T>): T | null {
   useRealtime(TICKETS_CHANGED, () => void refresh());
 
   return value;
+}
+
+function useQueue(): Ticket[] | null {
+  const rpc = useRpc<typeof rpcContract>();
+  const result = useLive(() => rpc.call("queue", {}));
+  return result === null ? null : result.tickets;
 }
 
 function useProjects(): ProjectRow[] | null {
@@ -2791,6 +3021,421 @@ function ProjectList({
         </ul>
       )}
     </section>
+  );
+}
+
+function QueueMenuItems({
+  index,
+  last,
+  onOpen,
+  onMove,
+  onRemove,
+}: {
+  index: number;
+  last: boolean;
+  onOpen: () => void;
+  onMove: (to: "top" | "up" | "down") => void;
+  onRemove: () => void;
+}) {
+  return (
+    <>
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={onOpen}>
+        <Glyph icon={ArrowRight01Icon} />
+        Open
+      </DropdownMenu.Item>
+      <DropdownMenu.Separator className="my-1 h-px bg-border" />
+      {index === 0 ? null : (
+        <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onMove("top")}>
+          <Glyph icon={ArrowUpDoubleIcon} />
+          Work on this next
+        </DropdownMenu.Item>
+      )}
+      {index === 0 ? null : (
+        <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onMove("up")}>
+          <Glyph icon={ArrowUp01Icon} />
+          Move up
+        </DropdownMenu.Item>
+      )}
+      {last ? null : (
+        <DropdownMenu.Item className={MENU_ITEM} onSelect={() => onMove("down")}>
+          <Glyph icon={ArrowDown01Icon} />
+          Move down
+        </DropdownMenu.Item>
+      )}
+      <DropdownMenu.Separator className="my-1 h-px bg-border" />
+      <DropdownMenu.Item className={MENU_ITEM} onSelect={onRemove}>
+        <Glyph icon={Cancel01Icon} />
+        Remove from queue
+      </DropdownMenu.Item>
+    </>
+  );
+}
+
+function QueueRowMenu({
+  ticket,
+  index,
+  last,
+  onOpen,
+  onMove,
+  onRemove,
+}: {
+  ticket: Ticket;
+  index: number;
+  last: boolean;
+  onOpen: () => void;
+  onMove: (to: "top" | "up" | "down") => void;
+  onRemove: () => void;
+}) {
+  return (
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild>
+        <Button
+          aria-label={`Actions for ${ticket.title}`}
+          className={ICON_BUTTON}
+          size="icon"
+          variant="ghost"
+        >
+          <Glyph icon={MoreHorizontalIcon} />
+        </Button>
+      </DropdownMenu.Trigger>
+      <DropdownMenu.Content
+        align="end"
+        className={MENU_CONTENT}
+        side="bottom"
+        sideOffset={4}
+      >
+        <QueueMenuItems
+          index={index}
+          last={last}
+          onMove={onMove}
+          onOpen={onOpen}
+          onRemove={onRemove}
+        />
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
+  );
+}
+
+function QueueView({
+  tickets,
+  projects,
+  onOpenTicket,
+  onClose,
+}: {
+  tickets: Ticket[];
+  projects: ProjectRow[] | null;
+  onOpenTicket: (ticket: Ticket) => void;
+  onClose: () => void;
+}) {
+  const rpc = useRpc<typeof rpcContract>();
+  const navigate = useBbNavigate();
+  const rootRef = useRef<HTMLDivElement>(null);
+  const tops = useRef<Map<string, number> | null>(null);
+  const quiet = useRef(false);
+  const focusId = useRef<string | null>(null);
+  const [note, setNote] = useState("");
+  const [ctx, setCtx] = useState<{
+    ticket: Ticket;
+    index: number;
+    x: number;
+    y: number;
+  } | null>(null);
+  const names = new Map((projects ?? []).map((one) => [one.id, one.name]));
+  const total = tickets.length;
+
+  useLayoutEffect(() => {
+    const root = rootRef.current;
+    if (root === null) return;
+    const reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    const next = new Map<string, number>();
+    for (const el of Array.from(
+      root.querySelectorAll<HTMLElement>("[data-queue-id]"),
+    )) {
+      const id = el.dataset.queueId ?? "";
+      const top = el.getBoundingClientRect().top;
+      next.set(id, top);
+      const before = tops.current?.get(id);
+      if (tops.current === null || reduced || quiet.current) continue;
+      if (before === undefined) {
+        el.animate(
+          [
+            { opacity: 0, transform: "translateY(4px)" },
+            { opacity: 1, transform: "none" },
+          ],
+          { duration: 180, easing: EASE_OUT },
+        );
+      } else if (before !== top) {
+        el.animate(
+          [{ transform: `translateY(${before - top}px)` }, { transform: "none" }],
+          { duration: 200, easing: EASE_IN_OUT },
+        );
+      }
+    }
+    tops.current = next;
+    quiet.current = false;
+    if (focusId.current !== null) {
+      root
+        .querySelector<HTMLElement>(`[data-queue-id="${focusId.current}"]`)
+        ?.focus();
+      focusId.current = null;
+    }
+  }, [tickets]);
+
+  const run = async (task: () => Promise<void>) => {
+    try {
+      await task();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Failed");
+    }
+  };
+
+  const move = (ticket: Ticket, to: "top" | "up" | "down", byKey = false) => {
+    quiet.current = byKey;
+    if (byKey) focusId.current = ticket.id;
+    const at = tickets.findIndex((one) => one.id === ticket.id);
+    const position =
+      to === "top" ? 1 : to === "up" ? Math.max(1, at) : Math.min(total, at + 2);
+    return run(async () => {
+      await rpc.call("queueMove", { id: ticket.id, to });
+      setNote(`Moved to position ${position} of ${total}`);
+    });
+  };
+
+  const remove = (ticket: Ticket, byKey = false) => {
+    quiet.current = byKey;
+    return run(async () => {
+      await rpc.call("queueSet", { ids: [ticket.id], queued: false });
+      setNote("Removed from queue");
+      toast("Removed from queue", {
+        description: ticket.title,
+        action: {
+          label: "Undo",
+          onClick: () =>
+            void rpc
+              .call("queueSet", { ids: [ticket.id], queued: true })
+              .catch(() => undefined),
+        },
+      });
+    });
+  };
+
+  const send = (ticket: Ticket) =>
+    run(async () => {
+      const { threadIds } = await rpc.call("send", {
+        ids: [ticket.id],
+        separate: false,
+      });
+      const opened = threadIds[0];
+      onClose();
+      if (opened) navigate.toThread(opened);
+      toast.success("Sent to agent");
+    });
+
+  const onContextMenu =
+    (ticket: Ticket, index: number) => (event: React.MouseEvent) => {
+      event.preventDefault();
+      event.stopPropagation();
+      setCtx({ ticket, index, x: event.clientX, y: event.clientY });
+    };
+
+  const onKeyDown = (ticket: Ticket, index: number) => (
+    event: React.KeyboardEvent,
+  ) => {
+    if (event.target !== event.currentTarget) return;
+    const down = event.key === "ArrowDown";
+    if (event.altKey && (down || event.key === "ArrowUp")) {
+      event.preventDefault();
+      if (down ? index === total - 1 : index === 0) return;
+      void move(ticket, down ? "down" : "up", true);
+      return;
+    }
+    if (down || event.key === "ArrowUp") {
+      event.preventDefault();
+      const rows = Array.from(
+        rootRef.current?.querySelectorAll<HTMLElement>("[data-queue-id]") ?? [],
+      );
+      rows[rows.indexOf(event.currentTarget as HTMLElement) + (down ? 1 : -1)]?.focus();
+      return;
+    }
+    if (event.key.toLowerCase() === "q" || event.key === "Delete") {
+      event.preventDefault();
+      void remove(ticket, true);
+    }
+  };
+
+  if (total === 0) {
+    return (
+      <div className="flex flex-col items-center gap-1 py-16 text-center">
+        <Glyph icon={PlayListIcon} className="size-5 text-muted-foreground/60" />
+        <p className="text-sm font-medium">Nothing queued</p>
+        <p className="max-w-xs text-xs text-muted-foreground">
+          Add tickets from any project and work through them in order.
+        </p>
+      </div>
+    );
+  }
+
+  const now = tickets[0] as Ticket;
+  const next = tickets.slice(1);
+  const projectName = (ticket: Ticket) =>
+    names.get(ticket.projectId) ?? "Unknown project";
+
+  return (
+    <div className="space-y-5" ref={rootRef}>
+      <div aria-live="polite" className="sr-only">
+        {note}
+      </div>
+      <section aria-labelledby="queue-now" className="space-y-2">
+        <h2
+          className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70"
+          id="queue-now"
+        >
+          Now
+        </h2>
+        <ol>
+          <li
+            aria-keyshortcuts="Alt+ArrowDown Q"
+            aria-label={`Now: ${now.title}, ${projectName(now)}`}
+            className="rounded-lg border border-border bg-background p-3 outline-none focus-visible:ring-2 focus-visible:ring-ring"
+            data-queue-id={now.id}
+            onContextMenu={onContextMenu(now, 0)}
+            onKeyDown={onKeyDown(now, 0)}
+            tabIndex={0}
+          >
+            <div className="flex items-start gap-2">
+              <Glyph
+                icon={STATUS_ICON[now.status]}
+                className={cn("mt-1", STATUS_TONE[now.status])}
+              />
+              <div className="min-w-0 flex-1">
+                <button
+                  className="block w-full text-left text-sm font-medium leading-5 outline-none hover:underline focus-visible:underline"
+                  onClick={() => onOpenTicket(now)}
+                  type="button"
+                >
+                  {now.title}
+                </button>
+                <div className="text-[11px] text-muted-foreground">
+                  {projectName(now)}
+                </div>
+              </div>
+              <ThreadBadge ticket={now} />
+              <QueueRowMenu
+                index={0}
+                last={total === 1}
+                onMove={(to) => void move(now, to)}
+                onOpen={() => onOpenTicket(now)}
+                onRemove={() => void remove(now)}
+                ticket={now}
+              />
+            </div>
+            {now.working ? null : (
+              <Button
+                className="mt-2 h-7 rounded-md px-2 text-[11px]"
+                onClick={() => void send(now)}
+                size="sm"
+                variant="secondary"
+              >
+                <Glyph icon={BotIcon} className="size-3" />
+                Send to agent
+              </Button>
+            )}
+          </li>
+        </ol>
+      </section>
+      {next.length === 0 ? null : (
+        <section aria-labelledby="queue-next" className="space-y-1">
+          <h2
+            className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground/70"
+            id="queue-next"
+          >
+            Next
+          </h2>
+          <ol start={2}>
+            {next.map((ticket, offset) => {
+              const index = offset + 1;
+              return (
+                <li
+                  aria-keyshortcuts="Alt+ArrowUp Alt+ArrowDown Q"
+                  aria-label={`${index + 1} of ${total}: ${ticket.title}, ${projectName(ticket)}`}
+                  className="flex items-center gap-2 rounded-md px-2 py-1.5 outline-none hover:bg-state-hover focus-visible:ring-2 focus-visible:ring-ring"
+                  data-queue-id={ticket.id}
+                  key={ticket.id}
+                  onContextMenu={onContextMenu(ticket, index)}
+                  onKeyDown={onKeyDown(ticket, index)}
+                  tabIndex={0}
+                >
+                  <span
+                    aria-hidden="true"
+                    className="w-4 shrink-0 text-right text-[11px] tabular-nums text-muted-foreground/70"
+                  >
+                    {index + 1}
+                  </span>
+                  <Glyph
+                    icon={STATUS_ICON[ticket.status]}
+                    className={STATUS_TONE[ticket.status]}
+                  />
+                  <button
+                    className="min-w-0 flex-1 truncate text-left text-[13px] outline-none hover:underline focus-visible:underline"
+                    onClick={() => onOpenTicket(ticket)}
+                    type="button"
+                  >
+                    {ticket.title}
+                  </button>
+                  <span className="max-w-[8rem] shrink-0 truncate text-[11px] text-muted-foreground/70">
+                    {projectName(ticket)}
+                  </span>
+                  <ThreadBadge ticket={ticket} />
+                  <QueueRowMenu
+                    index={index}
+                    last={index === total - 1}
+                    onMove={(to) => void move(ticket, to)}
+                    onOpen={() => onOpenTicket(ticket)}
+                    onRemove={() => void remove(ticket)}
+                    ticket={ticket}
+                  />
+                </li>
+              );
+            })}
+          </ol>
+        </section>
+      )}
+      <DropdownMenu.Root
+        modal={false}
+        onOpenChange={(open) => {
+          if (!open) setCtx(null);
+        }}
+        open={ctx !== null}
+      >
+        <DropdownMenu.Trigger asChild>
+          <span
+            aria-hidden="true"
+            className="pointer-events-none fixed size-0"
+            style={{ left: ctx?.x ?? 0, top: ctx?.y ?? 0 }}
+          />
+        </DropdownMenu.Trigger>
+        <DropdownMenu.Content
+          align="start"
+          className={MENU_CONTENT}
+          side="bottom"
+          sideOffset={0}
+        >
+          {ctx === null ? null : (
+            <QueueMenuItems
+              index={ctx.index}
+              last={ctx.index === total - 1}
+              onMove={(to) => void move(ctx.ticket, to)}
+              onOpen={() => onOpenTicket(ctx.ticket)}
+              onRemove={() => void remove(ctx.ticket)}
+            />
+          )}
+        </DropdownMenu.Content>
+      </DropdownMenu.Root>
+      <p className="text-[11px] text-muted-foreground/70">
+        <kbd className="font-sans">⌥↑</kbd> <kbd className="font-sans">⌥↓</kbd>{" "}
+        reorder · <kbd className="font-sans">Q</kbd> remove
+      </p>
+    </div>
   );
 }
 

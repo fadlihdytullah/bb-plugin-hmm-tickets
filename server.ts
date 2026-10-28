@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { registerTicketsCli, type TicketOps } from "./cli.ts";
+import { moveInQueue } from "./lib/queue.ts";
 import { statusSchema, ticketSchema, type Status, type Ticket } from "./lib/status.ts";
 
 const TICKETS_CHANGED = "tickets-changed";
@@ -90,6 +91,23 @@ export const rpcContract = defineRpcContract({
       })
       .strict(),
   },
+  queue: {
+    input: z.object({}).strict(),
+    output: z.object({ tickets: z.array(ticketSchema) }).strict(),
+  },
+  queueSet: {
+    input: idsInput.extend({ queued: z.boolean() }),
+    output: z.object({}).strict(),
+  },
+  queueMove: {
+    input: z
+      .object({
+        id: z.string().min(1),
+        to: z.enum(["top", "up", "down"]),
+      })
+      .strict(),
+    output: z.object({}).strict(),
+  },
   configGet: {
     input: z.object({ projectId: z.string().min(1) }).strict(),
     output: z.object({ worktree: z.boolean(), notes: z.boolean() }).strict(),
@@ -176,6 +194,8 @@ interface Row {
   archived: number;
   thread_id: string | null;
   done_at: number | null;
+  created_at: number;
+  queue_pos: number | null;
 }
 
 export default async function plugin(bb: BbPluginApi) {
@@ -197,6 +217,7 @@ export default async function plugin(bb: BbPluginApi) {
     `CREATE INDEX IF NOT EXISTS tickets_parent ON tickets (parent_id)`,
     `ALTER TABLE tickets ADD COLUMN position INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE tickets ADD COLUMN done_at INTEGER`,
+    `ALTER TABLE tickets ADD COLUMN queue_pos INTEGER`,
   ]);
 
   const publish = (): void => {
@@ -235,6 +256,9 @@ export default async function plugin(bb: BbPluginApi) {
     archived: row.archived === 1,
     threadId: row.thread_id,
     working: false,
+    createdAt: row.created_at,
+    doneAt: row.done_at,
+    queuePos: row.queue_pos,
   });
 
   const rowById = (id: string): Row => {
@@ -243,6 +267,27 @@ export default async function plugin(bb: BbPluginApi) {
       | undefined;
     if (row === undefined) throw new Error("Ticket not found");
     return row;
+  };
+
+  const queueRows = (): Row[] =>
+    db
+      .prepare(
+        "SELECT * FROM tickets WHERE queue_pos IS NOT NULL ORDER BY queue_pos ASC",
+      )
+      .all() as Row[];
+
+  const writeQueue = (ids: string[]): void => {
+    const set = db.prepare("UPDATE tickets SET queue_pos = ? WHERE id = ?");
+    db.transaction(() => {
+      db.prepare("UPDATE tickets SET queue_pos = NULL WHERE queue_pos IS NOT NULL").run();
+      ids.forEach((id, index) => set.run(index, id));
+    })();
+  };
+
+  const pruneQueue = (): void => {
+    const rows = queueRows();
+    const keep = rows.filter((row) => row.status !== "done" && row.archived === 0);
+    if (keep.length !== rows.length) writeQueue(keep.map((row) => row.id));
   };
 
   const childrenOf = (id: string): Row[] =>
@@ -353,12 +398,14 @@ export default async function plugin(bb: BbPluginApi) {
           );
         }
       }
+      pruneQueue();
       publish();
     },
 
     remove: (ids) => {
       const write = db.prepare("DELETE FROM tickets WHERE id = ? OR parent_id = ?");
       for (const id of ids) write.run(id, id);
+      pruneQueue();
       publish();
     },
 
@@ -512,6 +559,36 @@ export default async function plugin(bb: BbPluginApi) {
         .get() as { at: number | null };
       return { since, working: working.n, tracking: first.at, done };
     },
+    queue: async () => ({
+      tickets: await Promise.all(
+        queueRows().map((row) => hydrate(toTicket(row))),
+      ),
+    }),
+    queueSet: async ({ ids, queued }) => {
+      const current = queueRows().map((row) => row.id);
+      if (queued) {
+        const add = ids
+          .map(rowById)
+          .filter(
+            (row) =>
+              row.parent_id === null &&
+              row.status !== "done" &&
+              row.archived === 0 &&
+              !current.includes(row.id),
+          )
+          .map((row) => row.id);
+        writeQueue([...current, ...add]);
+      } else {
+        writeQueue(current.filter((id) => !ids.includes(id)));
+      }
+      publish();
+      return {};
+    },
+    queueMove: async ({ id, to }) => {
+      writeQueue(moveInQueue(queueRows().map((row) => row.id), id, to));
+      publish();
+      return {};
+    },
     configGet: async ({ projectId }) => ({
       worktree: await flagOf(projectId, "worktree"),
       notes: await flagOf(projectId, "notes"),
@@ -540,7 +617,10 @@ export default async function plugin(bb: BbPluginApi) {
           .join(",")})`,
       )
       .run(to, to === "done" ? Date.now() : null, threadId, ...from);
-    if (result.changes > 0) publish();
+    if (result.changes > 0) {
+      if (to === "done") pruneQueue();
+      publish();
+    }
   };
 
   bb.events.on("thread.active", ({ thread }) => {
