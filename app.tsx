@@ -57,7 +57,9 @@ import {
   splitDraft,
   STATUS_LABEL,
   STATUSES,
+  THREAD_KIND_LABEL,
   type Status,
+  type ThreadLink,
   type Ticket,
 } from "@/lib/status";
 import {
@@ -254,6 +256,97 @@ function ThreadBadge({ ticket }: { ticket: Ticket }) {
       />
       {working ? "Working" : null}
     </button>
+  );
+}
+
+function useThreadLinks(ticketId: string | null) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [links, setLinks] = useState<readonly ThreadLink[]>([]);
+
+  const refresh = useCallback(async () => {
+    if (ticketId === null) return;
+    try {
+      const result = await rpc.call("threads", { ticketId });
+      setLinks(result.threads);
+    } catch {
+      setLinks([]);
+    }
+  }, [rpc, ticketId]);
+
+  useEffect(() => {
+    setLinks([]);
+    void refresh();
+  }, [refresh]);
+
+  useRealtime(TICKETS_CHANGED, () => void refresh());
+
+  return links;
+}
+
+function ThreadChip({
+  links,
+  onClose,
+}: {
+  links: readonly ThreadLink[];
+  onClose: () => void;
+}) {
+  const navigate = useBbNavigate();
+  const open = (threadId: string) => {
+    onClose();
+    navigate.toThread(threadId);
+  };
+  const live = links.filter((one) => !one.gone);
+  if (live.length === 0) return null;
+  const working = live.some((one) => one.working);
+  const chip = (
+    <Button
+      aria-label={
+        live.length === 1
+          ? "Open linked thread"
+          : `${live.length} linked threads`
+      }
+      className="h-7 gap-1 rounded-md px-2 text-xs text-muted-foreground"
+      onClick={live.length === 1 ? () => open(live[0]!.threadId) : undefined}
+      size="sm"
+      variant="ghost"
+    >
+      <Glyph
+        icon={working ? Loading03Icon : BotIcon}
+        className={cn(
+          "size-3.5",
+          working && "animate-spin text-amber-600 dark:text-amber-400",
+        )}
+      />
+      {live.length === 1 ? "Thread" : `${live.length} threads`}
+    </Button>
+  );
+  if (live.length === 1) return chip;
+  return (
+    <DropdownMenu.Root modal={false}>
+      <DropdownMenu.Trigger asChild>{chip}</DropdownMenu.Trigger>
+      <DropdownMenu.Content
+        align="start"
+        className={MENU_CONTENT}
+        side="top"
+        sideOffset={6}
+      >
+        {live.map((one) => (
+          <DropdownMenu.Item
+            className={MENU_ITEM}
+            key={`${one.threadId}:${one.kind}`}
+            onSelect={() => open(one.threadId)}
+          >
+            <Glyph icon={one.working ? Loading03Icon : BotIcon} />
+            <span className="text-muted-foreground">
+              {THREAD_KIND_LABEL[one.kind]}
+            </span>
+            <span className="max-w-[16rem] truncate">
+              {one.title === "" ? one.threadId : one.title}
+            </span>
+          </DropdownMenu.Item>
+        ))}
+      </DropdownMenu.Content>
+    </DropdownMenu.Root>
   );
 }
 
@@ -1302,6 +1395,7 @@ function TicketForm({
   subtasks,
   projectId,
   onBack,
+  onClose,
   onOpenTicket,
   onSend,
   onArchive,
@@ -1312,12 +1406,14 @@ function TicketForm({
   subtasks: Ticket[];
   projectId: string;
   onBack: () => void;
+  onClose: () => void;
   onOpenTicket: (id: string) => void;
   onSend: (ticket: Ticket) => void;
   onArchive: (ticket: Ticket) => void;
   onDelete: (ticket: Ticket) => void;
 }) {
   const rpc = useRpc<typeof rpcContract>();
+  const threadLinks = useThreadLinks(ticket?.id ?? null);
   const [editing, setEditing] = useState(ticket === null);
   const [title, setTitle] = useState(ticket?.title ?? "");
   const [description, setDescription] = useState(ticket?.description ?? "");
@@ -1553,6 +1649,7 @@ function TicketForm({
               }
               value={ticket.status}
             />
+            <ThreadChip links={threadLinks} onClose={onClose} />
             <div className="flex-1" />
             <Button
               className="h-7 rounded-md px-2 text-xs"
@@ -2620,6 +2717,7 @@ function TicketsBoard({
           key={view.id ?? "new"}
           onArchive={(ticket) => void archive([ticket], !ticket.archived)}
           onBack={() => setView(backView)}
+          onClose={close}
           onDelete={(ticket) => remove([ticket])}
           onOpenTicket={(id) => setView({ kind: "form", id })}
           onSend={(ticket) =>

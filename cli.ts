@@ -5,7 +5,9 @@ import {
   STATUS_LABEL,
   STATUSES,
   statusSchema,
+  THREAD_KIND_LABEL,
   type Status,
+  type ThreadLink,
   type Ticket,
 } from "./lib/status.ts";
 
@@ -18,6 +20,7 @@ export interface TicketOps {
     parentId?: string;
     title: string;
     description: string;
+    originThreadId?: string;
   }): Promise<string>;
   update(input: {
     ids: string[];
@@ -35,6 +38,7 @@ export interface TicketOps {
     notes?: string,
   ): Promise<string[]>;
   hydrate(ticket: Ticket): Promise<Ticket>;
+  threadsOf(ticketId: string): Promise<ThreadLink[]>;
 }
 
 const USAGE = `bb tickets <command>
@@ -76,7 +80,11 @@ function line(ticket: Ticket, children: Ticket[] = []): string[] {
   ];
 }
 
-function detail(ticket: Ticket, children: Ticket[] = []): string {
+function detail(
+  ticket: Ticket,
+  children: Ticket[] = [],
+  threads: ThreadLink[] = [],
+): string {
   const rows = [
     `id          ${ticket.id}`,
     `title       ${ticket.title}`,
@@ -86,6 +94,16 @@ function detail(ticket: Ticket, children: Ticket[] = []): string {
   ];
   if (ticket.description.trim() !== "") {
     rows.push("", ticket.description.trim());
+  }
+  if (threads.length > 0) {
+    rows.push(
+      "",
+      "Threads",
+      ...threads.map(
+        (one) =>
+          `  ${THREAD_KIND_LABEL[one.kind]}  ${one.threadId}${one.title === "" ? "" : ` · ${one.title}`}${one.gone ? " · deleted" : ""}`,
+      ),
+    );
   }
   if (children.length > 0) {
     rows.push(
@@ -255,10 +273,11 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             if (ref === undefined) return fail("Usage: bb tickets show <ref>");
             const ticket = await ops.hydrate(resolve(projectOf(), ref));
             const children = childrenOf(ticket);
+            const threads = await ops.threadsOf(ticket.id);
             return ok(
               json
-                ? JSON.stringify({ ...ticket, children }, null, 2)
-                : detail(ticket, children),
+                ? JSON.stringify({ ...ticket, children, threads }, null, 2)
+                : detail(ticket, children, threads),
             );
           }
 
@@ -273,11 +292,12 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
             if (tickets.length === 0) {
               return ok("No ticket is attached to this thread");
             }
-            return ok(
-              tickets
-                .map((ticket) => detail(ticket, childrenOf(ticket)))
-                .join("\n\n"),
+            const blocks = await Promise.all(
+              tickets.map(async (ticket) =>
+                detail(ticket, childrenOf(ticket), await ops.threadsOf(ticket.id)),
+              ),
             );
+            return ok(blocks.join("\n\n"));
           }
 
           case "create": {
@@ -294,6 +314,9 @@ export function registerTicketsCli(bb: BbPluginApi, ops: TicketOps): void {
                 : { parentId: resolve(projectId, parentRef).id }),
               title,
               description: flagString(flags, "description") ?? "",
+              ...(ctx.threadId === undefined || ctx.threadId === ""
+                ? {}
+                : { originThreadId: ctx.threadId }),
             });
             return ok(json ? JSON.stringify({ id }, null, 2) : id);
           }

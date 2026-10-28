@@ -31,6 +31,31 @@ export const ticketSchema = z
 
 export type Ticket = z.infer<typeof ticketSchema>;
 
+export const THREAD_KINDS = ["created", "sent", "mentioned"] as const;
+
+export const threadLinkSchema = z
+  .object({
+    threadId: z.string(),
+    kind: z.enum(THREAD_KINDS),
+    title: z.string(),
+    working: z.boolean(),
+    gone: z.boolean(),
+    at: z.number(),
+  })
+  .strict();
+
+export type ThreadLink = z.infer<typeof threadLinkSchema>;
+
+export const THREAD_KIND_LABEL: Record<ThreadLink["kind"], string> = {
+  created: "Created in",
+  sent: "Sent to",
+  mentioned: "Mentioned in",
+};
+
+export function mentionedThreads(text: string): string[] {
+  return [...new Set([...text.matchAll(/@thread:(thr_[A-Za-z0-9]+)/g)].map((m) => m[1] as string))];
+}
+
 export const RECENT_DAYS = 14;
 
 export function isStale(ticket: Ticket, now: number): boolean {

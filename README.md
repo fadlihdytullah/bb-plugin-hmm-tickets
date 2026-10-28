@@ -92,6 +92,14 @@ Click the title to rename it in place. Opening a ticket shows it in read mode, t
 **Edit** switches to writing; `Cmd+Enter` saves and `Esc` cancels. The footer
 also carries the status picker, **Send**, archive, and delete.
 
+### Linked threads
+
+A chip next to the status picker opens the threads a ticket is tied to: where
+it was created (from `bb tickets create` inside a thread), where it was sent,
+and any `@thread:thr_...` mentioned in the description. One thread opens
+directly; several open a menu. Clicking closes the window and opens the thread.
+The chip spins while one of them is working.
+
 ### Sub-tasks
 
 A ticket can hold sub-tasks, one level deep. In the detail, a progress bar sits
@@ -141,7 +149,19 @@ bb tickets send <ref>... [--separate | --here | --thread <id>] [--worktree|--no-
 
 A `<ref>` is a ticket id or a unique id prefix. `bb tickets current` reads the
 tickets handed to the running thread, so an agent can look up its own
-assignment and close it when it is finished.
+assignment and close it when it is finished. `create` run inside a thread links
+that thread to the ticket; `show` lists every linked thread.
+
+## `/hmm-bb-tickets` skill
+
+A global agent skill that turns a conversation into tickets with `bb tickets
+create`. It lives outside this repo, in `~/.agents/skills/hmm-bb-tickets`.
+
+| Flag | Result |
+| --- | --- |
+| `--single` | One ticket |
+| `--multi` | Several independent tickets |
+| `--subtasks` | One parent ticket with sub-tasks |
 
 ## Development
 

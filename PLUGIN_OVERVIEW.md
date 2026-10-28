@@ -22,6 +22,8 @@ grouped by status, with every ticket one right-click away from an agent.
   batch, one thread per ticket, or straight into the thread you are reading.
   The ticket moves to In Progress, shows a spinner while the agent works, and
   its badge opens that thread.
+- A footer chip lists the threads a ticket is tied to: created in, sent to, or
+  mentioned in the description. Clicking one opens it.
 - A **Queue** across all projects: mark To Do and In Progress tickets, reorder
   them, and keep one **Now** with the rest **Next**. It leaves the queue when
   the ticket is done.
@@ -43,6 +45,7 @@ idle marks it Done.
 
 `bb tickets` covers the list: `list`, `show`, `current`, `create`, `update`,
 `status`, `archive`, `unarchive`, `delete`, and `send`. Every command takes
-`--json`, and a ticket reference can be a short id prefix. `bb tickets current`
-reads the tickets handed to the running thread, so a worker can read its own
+`--json`, and a ticket reference can be a short id prefix. `create` inside a
+thread links it to the ticket. `bb tickets current` reads the tickets handed to
+the running thread, so a worker can read its own
 assignment and close it with `bb tickets status <id> done`.

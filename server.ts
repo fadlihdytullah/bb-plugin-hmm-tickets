@@ -3,7 +3,15 @@ import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 import { registerTicketsCli, type TicketOps } from "./cli.ts";
 import { moveInQueue } from "./lib/queue.ts";
-import { statusSchema, ticketSchema, type Status, type Ticket } from "./lib/status.ts";
+import {
+  statusSchema,
+  mentionedThreads,
+  threadLinkSchema,
+  ticketSchema,
+  type Status,
+  type ThreadLink,
+  type Ticket,
+} from "./lib/status.ts";
 
 const TICKETS_CHANGED = "tickets-changed";
 const MAX_TITLE = 200;
@@ -38,6 +46,10 @@ export const rpcContract = defineRpcContract({
       archived: z.boolean().optional(),
     }),
     output: z.object({}).strict(),
+  },
+  threads: {
+    input: z.object({ ticketId: z.string().min(1) }).strict(),
+    output: z.object({ threads: z.array(threadLinkSchema) }).strict(),
   },
   reorder: {
     input: z
@@ -218,6 +230,15 @@ export default async function plugin(bb: BbPluginApi) {
     `ALTER TABLE tickets ADD COLUMN position INTEGER NOT NULL DEFAULT 0`,
     `ALTER TABLE tickets ADD COLUMN done_at INTEGER`,
     `ALTER TABLE tickets ADD COLUMN queue_pos INTEGER`,
+    `CREATE TABLE IF NOT EXISTS ticket_threads (
+       ticket_id TEXT NOT NULL,
+       thread_id TEXT NOT NULL,
+       kind TEXT NOT NULL,
+       at INTEGER NOT NULL,
+       PRIMARY KEY (ticket_id, thread_id, kind)
+     )`,
+    `INSERT OR IGNORE INTO ticket_threads (ticket_id, thread_id, kind, at)
+       SELECT id, thread_id, 'sent', created_at FROM tickets WHERE thread_id IS NOT NULL`,
   ]);
 
   const publish = (): void => {
@@ -295,6 +316,12 @@ export default async function plugin(bb: BbPluginApi) {
       .prepare("SELECT * FROM tickets WHERE parent_id = ? ORDER BY position ASC, created_at ASC")
       .all(id) as Row[];
 
+  const link = (ticketId: string, threadId: string, kind: ThreadLink["kind"]): void => {
+    db.prepare(
+      "INSERT OR IGNORE INTO ticket_threads (ticket_id, thread_id, kind, at) VALUES (?, ?, ?, ?)",
+    ).run(ticketId, threadId, kind, Date.now());
+  };
+
   const isWorking = async (threadId: string | null): Promise<boolean> => {
     if (threadId === null) return false;
     try {
@@ -308,6 +335,53 @@ export default async function plugin(bb: BbPluginApi) {
     } catch {
       return false;
     }
+  };
+
+  const threadsOf = async (ticketId: string): Promise<ThreadLink[]> => {
+    const stored = db
+      .prepare(
+        "SELECT thread_id, kind, at FROM ticket_threads WHERE ticket_id = ? ORDER BY at ASC",
+      )
+      .all(ticketId) as { thread_id: string; kind: ThreadLink["kind"]; at: number }[];
+    const ticket = db
+      .prepare("SELECT description, created_at FROM tickets WHERE id = ?")
+      .get(ticketId) as { description: string; created_at: number } | undefined;
+    const known = new Set(stored.map((row) => row.thread_id));
+    const rows = [
+      ...stored,
+      ...mentionedThreads(ticket?.description ?? "")
+        .filter((id) => !known.has(id))
+        .map((id) => ({
+          thread_id: id,
+          kind: "mentioned" as const,
+          at: ticket?.created_at ?? 0,
+        })),
+    ];
+    return Promise.all(
+      rows.map(async (row) => {
+        try {
+          const thread = await bb.sdk.threads.get({ threadId: row.thread_id });
+          const gone = thread.deletedAt !== null;
+          return {
+            threadId: row.thread_id,
+            kind: row.kind,
+            title: thread.title ?? "",
+            working: !gone && (await isWorking(row.thread_id)),
+            gone,
+            at: row.at,
+          };
+        } catch {
+          return {
+            threadId: row.thread_id,
+            kind: row.kind,
+            title: "",
+            working: false,
+            gone: true,
+            at: row.at,
+          };
+        }
+      }),
+    );
   };
 
   const hydrate = async (ticket: Ticket): Promise<Ticket> => ({
@@ -341,7 +415,7 @@ export default async function plugin(bb: BbPluginApi) {
           .all(threadId) as Row[]
       ).map(toTicket),
 
-    create: async ({ projectId, parentId, title, description }) => {
+    create: async ({ projectId, parentId, title, description, originThreadId }) => {
       const project = await bb.sdk.projects.get({ projectId });
       if (project.kind === "personal") throw new Error("Tickets need a project");
       if (parentId !== undefined) {
@@ -365,6 +439,7 @@ export default async function plugin(bb: BbPluginApi) {
         Date.now(),
         parentId ?? null,
       );
+      if (originThreadId !== undefined) link(id, originThreadId, "created");
       publish();
       return id;
     },
@@ -404,7 +479,13 @@ export default async function plugin(bb: BbPluginApi) {
 
     remove: (ids) => {
       const write = db.prepare("DELETE FROM tickets WHERE id = ? OR parent_id = ?");
-      for (const id of ids) write.run(id, id);
+      const unlink = db.prepare(
+        "DELETE FROM ticket_threads WHERE ticket_id = ? OR ticket_id IN (SELECT id FROM tickets WHERE parent_id = ?)",
+      );
+      for (const id of ids) {
+        unlink.run(id, id);
+        write.run(id, id);
+      }
       pruneQueue();
       publish();
     },
@@ -434,7 +515,10 @@ export default async function plugin(bb: BbPluginApi) {
             },
           ],
         });
-        for (const row of rows) attach.run(threadId, row.id);
+        for (const row of rows) {
+          attach.run(threadId, row.id);
+          link(row.id, threadId, "sent");
+        }
         publish();
         return [threadId];
       }
@@ -455,7 +539,10 @@ export default async function plugin(bb: BbPluginApi) {
               : `${lead.title} +${batch.length - 1}`,
           prompt: promptFor(batch, notes, childrenOf),
         });
-        for (const row of batch) attach.run(thread.id, row.id);
+        for (const row of batch) {
+          attach.run(thread.id, row.id);
+          link(row.id, thread.id, "sent");
+        }
         threadIds.push(thread.id);
       }
       publish();
@@ -463,6 +550,7 @@ export default async function plugin(bb: BbPluginApi) {
     },
 
     hydrate,
+    threadsOf,
   };
 
   bb.rpc.register(rpcContract, {
@@ -472,6 +560,7 @@ export default async function plugin(bb: BbPluginApi) {
       ops.update(input);
       return {};
     },
+    threads: async ({ ticketId }) => ({ threads: await threadsOf(ticketId) }),
     reorder: async ({ parentId, ids }) => {
       const siblings = new Set(childrenOf(parentId).map((row) => row.id));
       if (ids.length !== siblings.size || ids.some((id) => !siblings.has(id))) {
